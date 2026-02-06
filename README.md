@@ -1,4 +1,4 @@
-# Claude Code Permission Hook (Subscription-Powered)
+# Claude Code Drinking Bird
 
 Routes permission requests through Claude itself using your existing subscription — no API key, no OpenRouter, no extra billing.
 
@@ -20,7 +20,7 @@ The hook calls `claude -p` (print mode) for ambiguous cases, which authenticates
 If you have a plugin marketplace configured:
 
 ```
-/install-plugin approval-hook
+/install-plugin claude-code-drinking-bird
 ```
 
 The hook registers automatically — no manual config needed.
@@ -28,7 +28,7 @@ The hook registers automatically — no manual config needed.
 ### Option B: Install Script
 
 ```bash
-git clone <repo-url> && cd approval-hook
+git clone <repo-url> && cd claude-drinking-bird
 ./install.sh
 ```
 
