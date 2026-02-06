@@ -15,21 +15,35 @@ The hook calls `claude -p` (print mode) for ambiguous cases, which authenticates
 
 ## Install
 
-```bash
-# 1. Create the hooks directory
-mkdir -p ~/.claude/hooks
+### Option A: Claude Code Plugin (recommended)
 
-# 2. Copy the hook script
-cp permission-hook.py ~/.claude/hooks/permission-hook.py
-chmod +x ~/.claude/hooks/permission-hook.py
+If you have a plugin marketplace configured:
 
-# 3. Add to your Claude Code settings
-#    Edit ~/.claude/settings.json and merge in the hooks config below
+```
+/install-plugin approval-hook
 ```
 
-## Settings config
+The hook registers automatically — no manual config needed.
 
-Add this to your `~/.claude/settings.json`:
+### Option B: Install Script
+
+```bash
+git clone <repo-url> && cd approval-hook
+./install.sh
+```
+
+This copies the hook to `~/.claude/hooks/` and adds the config to `~/.claude/settings.json`.
+
+### Option C: Manual
+
+```bash
+# 1. Copy the hook script
+mkdir -p ~/.claude/hooks
+cp hooks/permission-hook.py ~/.claude/hooks/permission-hook.py
+chmod +x ~/.claude/hooks/permission-hook.py
+
+# 2. Add to ~/.claude/settings.json (merge if file exists):
+```
 
 ```json
 {
@@ -49,7 +63,15 @@ Add this to your `~/.claude/settings.json`:
 }
 ```
 
-If you already have other settings in that file, just merge the `hooks` key in.
+## Uninstall
+
+```bash
+./uninstall.sh
+```
+
+Or manually: remove `~/.claude/hooks/permission-hook.py` and delete the `PermissionRequest` hook entry from `~/.claude/settings.json`.
+
+Restart Claude Code after installing or uninstalling. Run `/hooks` to verify.
 
 ## What gets auto-approved (Tier 1, instant)
 
@@ -73,12 +95,12 @@ Claude sees the tool name, full input, and working directory, and responds ALLOW
 
 ## Customization
 
-Edit the lists at the top of `permission-hook.py`:
+Edit the lists at the top of `hooks/permission-hook.py`:
 
 - `SAFE_TOOLS` — tools to always approve
 - `SAFE_BASH_PREFIXES` — bash command prefixes to always approve
 - `DANGEROUS_BASH_PATTERNS` — bash patterns to always block
-- `SENSITIVE_FILE_PATTERNS` — file paths to always block read/write
+- `SENSITIVE_PATH_PATTERNS` / `SENSITIVE_BASENAME_PATTERNS` — file paths to always block read/write
 
 ## Costs
 
