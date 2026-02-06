@@ -1,0 +1,16 @@
+{
+  "description": "Tiered permission approval: auto-approve safe ops, auto-deny dangerous ops, ask Claude for ambiguous cases",
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/permission-hook.py"
+          }
+        ]
+      }
+    ]
+  }
+}

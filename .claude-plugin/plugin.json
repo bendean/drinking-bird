@@ -1,0 +1,10 @@
+{
+  "name": "approval-hook",
+  "description": "Routes Claude Code permission requests through a tiered approval system: auto-approve safe ops, auto-deny dangerous ops, ask Claude for ambiguous cases",
+  "version": "0.1.0",
+  "author": {
+    "name": "Ben"
+  },
+  "license": "MIT",
+  "keywords": ["hooks", "permissions", "security", "approval"]
+}
