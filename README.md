@@ -1,6 +1,6 @@
-# Claude Code Drinking Bird
+# Drinking Bird
 
-Routes permission requests through Claude itself using your existing subscription — no API key, no OpenRouter, no extra billing.
+A Claude Code hook that routes permission requests through Claude itself using your existing subscription — no API key, no OpenRouter, no extra billing.
 
 ## How it works
 
@@ -20,7 +20,7 @@ The hook calls `claude -p` (print mode) for ambiguous cases, which authenticates
 If you have a plugin marketplace configured:
 
 ```
-/install-plugin claude-code-drinking-bird
+/install-plugin drinking-bird
 ```
 
 The hook registers automatically — no manual config needed.
@@ -28,7 +28,7 @@ The hook registers automatically — no manual config needed.
 ### Option B: Install Script
 
 ```bash
-git clone <repo-url> && cd claude-drinking-bird
+git clone <repo-url> && cd drinking-bird
 ./install.sh
 ```
 
@@ -113,3 +113,9 @@ Zero additional cost. The `claude -p` command uses your existing Pro or Max subs
 **"claude: command not found"**: Make sure the Claude CLI is in your PATH. The hook will fall through to manual approval if it can't find the CLI.
 
 **Slow evaluations**: The 15-second timeout ensures the hook never hangs. If Claude is slow, it falls through to manual approval. You can adjust the timeout in the script.
+
+## References
+
+The name "drinking bird" comes from [a Simpsons episode](https://simpsons.fandom.com/wiki/Drinking_Bird) where Homer uses a drinking bird toy to automatically press "Y" on his keyboard at the nuclear power plant — which, predictably, triggers a meltdown.
+
+The idea for this hook comes from [Boris Cherny's Claude Code workflow](https://x.com/bcherny), specifically step 8c: "Route permission requests to Opus 4.5 via a hook — let it scan for attacks and auto-approve the safe ones."
