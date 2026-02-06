@@ -18,6 +18,7 @@ import json
 import sys
 import subprocess
 import os
+import re
 
 # ============================================================================
 # TIER 1: Auto-approve (instant, no LLM call)
@@ -132,12 +133,6 @@ DANGEROUS_BASH_PATTERNS = [
     "chmod 777 ",
     "chmod -R 777",
     "> /dev/sda",
-    "curl | sh",
-    "curl | bash",
-    "wget | sh",
-    "wget | bash",
-    "eval $(curl",
-    "eval $(wget",
     # Sensitive file access
     "cat /etc/shadow",
     "cat /etc/passwd",
@@ -210,7 +205,15 @@ def is_safe_bash(command: str) -> bool:
 def is_dangerous_bash(command: str) -> bool:
     """Check if a bash command matches dangerous patterns."""
     cmd = command.strip().lower()
-    return any(pattern in cmd for pattern in DANGEROUS_BASH_PATTERNS)
+    if any(pattern in cmd for pattern in DANGEROUS_BASH_PATTERNS):
+        return True
+    # Pipe-chain detection: curl/wget ... | sh/bash
+    if re.search(r"\b(curl|wget)\b.*\|\s*(sh|bash)\b", cmd):
+        return True
+    # Eval subshell detection: eval $(curl ...) / eval $(wget ...)
+    if re.search(r"\beval\s+\$\((curl|wget)\b", cmd):
+        return True
+    return False
 
 
 def is_sensitive_file(path: str) -> bool:
