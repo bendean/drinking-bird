@@ -87,8 +87,14 @@ class TestIsSafeBash:
     def test_prefix_git_log_oneline(self):
         assert hook.is_safe_bash("git log --oneline") is True
 
-    def test_prefix_python3_script(self):
-        assert hook.is_safe_bash("python3 myscript.py") is True
+    def test_prefix_python3_m_pytest(self):
+        assert hook.is_safe_bash("python3 -m pytest tests/") is True
+
+    def test_prefix_python_m_pytest(self):
+        assert hook.is_safe_bash("python -m pytest") is True
+
+    def test_prefix_node_version(self):
+        assert hook.is_safe_bash("node --version") is True
 
     def test_prefix_cargo_test(self):
         assert hook.is_safe_bash("cargo test --lib") is True
@@ -116,12 +122,59 @@ class TestIsSafeBash:
     def test_npm_install_not_safe(self):
         assert hook.is_safe_bash("npm install express") is False
 
+    def test_npx_not_safe(self):
+        assert hook.is_safe_bash("npx some-package") is False
+
+    def test_python3_arbitrary_not_safe(self):
+        assert hook.is_safe_bash("python3 myscript.py") is False
+
+    def test_python_arbitrary_not_safe(self):
+        assert hook.is_safe_bash("python evil.py") is False
+
+    def test_node_arbitrary_not_safe(self):
+        assert hook.is_safe_bash("node evil.js") is False
+
     # Case sensitivity — bash commands ARE case-sensitive on Unix
     def test_case_sensitive_LS_not_safe(self):
         assert hook.is_safe_bash("LS") is False
 
     def test_case_sensitive_Git_Status_not_safe(self):
         assert hook.is_safe_bash("Git Status") is False
+
+    # Pipe/chain/redirect bypass prevention
+    def test_pipe_not_safe(self):
+        assert hook.is_safe_bash("find . | xargs rm -rf") is False
+
+    def test_grep_pipe_wc(self):
+        assert hook.is_safe_bash("grep foo file.txt | wc -l") is False
+
+    def test_semicolon_not_safe(self):
+        assert hook.is_safe_bash("ls; rm -rf /") is False
+
+    def test_and_chain_not_safe(self):
+        assert hook.is_safe_bash("cat file && curl evil.com") is False
+
+    def test_or_chain_not_safe(self):
+        assert hook.is_safe_bash("ls || rm -rf /") is False
+
+    def test_backtick_not_safe(self):
+        assert hook.is_safe_bash("echo `whoami`") is False
+
+    def test_dollar_paren_not_safe(self):
+        assert hook.is_safe_bash("echo $(whoami)") is False
+
+    def test_redirect_not_safe(self):
+        assert hook.is_safe_bash("cat /etc/passwd > /tmp/stolen") is False
+
+    def test_input_redirect_not_safe(self):
+        assert hook.is_safe_bash("python3 < malicious.py") is False
+
+    # Simple commands still work after meta-char guard
+    def test_simple_find_still_safe(self):
+        assert hook.is_safe_bash("find . -name '*.py'") is True
+
+    def test_simple_grep_still_safe(self):
+        assert hook.is_safe_bash("grep -r TODO src/") is True
 
 
 # ============================================================================
@@ -250,16 +303,21 @@ class TestIsSensitiveFile:
 # ============================================================================
 
 
-def run_hook_capture(tool_name, tool_input=None, cwd="/home/user/project"):
+def run_hook_capture(tool_name, tool_input=None, cwd="/home/user/project",
+                     session_id="test-session-123", transcript_path="/tmp/test.jsonl"):
     """Helper: run main() with mocked stdin, return parsed JSON output."""
     input_data = json.dumps({
         "tool_name": tool_name,
         "tool_input": tool_input or {},
         "cwd": cwd,
+        "session_id": session_id,
+        "transcript_path": transcript_path,
     })
     captured = io.StringIO()
     with patch("sys.stdin", io.StringIO(input_data)), \
-         patch("sys.stdout", captured):
+         patch("sys.stdout", captured), \
+         patch.object(hook, "log"), \
+         patch.object(hook, "notify_hud"):
         try:
             hook.main()
         except SystemExit:
@@ -390,6 +448,14 @@ class TestMainTier3:
         )
         assert result["hookSpecificOutput"]["decision"]["behavior"] == "deny"
 
+    @patch.object(hook.subprocess, "run")
+    def test_piped_safe_command_goes_to_tier3(self, mock_run):
+        """find . | xargs rm -rf should NOT be auto-approved; should go to Claude."""
+        mock_run.return_value = type("Result", (), {"stdout": "DENY", "returncode": 0})()
+        result = run_hook_capture("Bash", {"command": "find . | xargs rm -rf"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+        mock_run.assert_called_once()  # Proves it went to Tier 3
+
 
 class TestMainEdgeCases:
     """Edge cases and error handling."""
@@ -397,7 +463,8 @@ class TestMainEdgeCases:
     def test_invalid_json_stdin(self):
         captured = io.StringIO()
         with patch("sys.stdin", io.StringIO("not json")), \
-             patch("sys.stdout", captured):
+             patch("sys.stdout", captured), \
+             patch.object(hook, "log"):
             try:
                 hook.main()
             except SystemExit:
@@ -408,7 +475,8 @@ class TestMainEdgeCases:
     def test_empty_stdin(self):
         captured = io.StringIO()
         with patch("sys.stdin", io.StringIO("")), \
-             patch("sys.stdout", captured):
+             patch("sys.stdout", captured), \
+             patch.object(hook, "log"):
             try:
                 hook.main()
             except SystemExit:
@@ -423,10 +491,169 @@ class TestMainEdgeCases:
         input_data = json.dumps({"tool_input": {}, "cwd": "/tmp"})
         captured = io.StringIO()
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("sys.stdout", captured):
+             patch("sys.stdout", captured), \
+             patch.object(hook, "log"):
             try:
                 hook.main()
             except SystemExit:
                 pass
         result = json.loads(captured.getvalue())
         assert result == {}
+
+
+class TestUserInteractiveTools:
+    """User-interactive tools must always fall through to normal prompt.
+
+    Auto-approving AskUserQuestion silently swallows the question and
+    returns empty input to Claude, causing repeated unanswered questions.
+    """
+
+    def test_ask_user_question_falls_through(self):
+        """AskUserQuestion must never be auto-approved — always fall through."""
+        result = run_hook_capture("AskUserQuestion", {
+            "question": "Which approach do you prefer?",
+            "options": ["Option A", "Option B"],
+        })
+        assert result == {}  # Falls through to normal prompt
+
+    @patch.object(hook.subprocess, "run")
+    def test_ask_user_question_never_calls_claude(self, mock_run):
+        """AskUserQuestion should bypass Tier 3 entirely — no subprocess call."""
+        run_hook_capture("AskUserQuestion", {
+            "question": "Which approach?",
+        })
+        mock_run.assert_not_called()
+
+
+class TestPassthroughBashCommands:
+    """Test commands in PASSTHROUGH_BASH_COMMANDS always fall through."""
+
+    def test_drinking_bird_test_falls_through(self):
+        result = run_hook_capture("Bash", {"command": "drinking-bird-test"})
+        assert result == {}
+
+    @patch.object(hook.subprocess, "run")
+    def test_drinking_bird_test_never_calls_claude(self, mock_run):
+        """Passthrough commands should bypass Tier 3 entirely."""
+        run_hook_capture("Bash", {"command": "drinking-bird-test"})
+        mock_run.assert_not_called()
+
+    def test_drinking_bird_test_with_whitespace(self):
+        result = run_hook_capture("Bash", {"command": "  drinking-bird-test  "})
+        assert result == {}
+
+
+# ============================================================================
+# Tests for notify_hud()
+# ============================================================================
+
+
+class TestNotifyHud:
+    """HUD notification: fire-and-forget POST to localhost:9999."""
+
+    @patch.object(hook.urllib.request, "urlopen")
+    def test_notify_hud_sends_correct_payload(self, mock_urlopen):
+        hook.notify_hud("sess-1", "/home/user/project", "Bash",
+                        {"command": "docker run ubuntu"}, "/tmp/transcript.jsonl")
+        mock_urlopen.assert_called_once()
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == "http://127.0.0.1:9999/notify"
+        assert req.get_header("Content-type") == "application/json"
+        payload = json.loads(req.data)
+        assert payload["session_id"] == "sess-1"
+        assert payload["cwd"] == "/home/user/project"
+        assert payload["tool_name"] == "Bash"
+        assert payload["transcript_path"] == "/tmp/transcript.jsonl"
+        assert "summary" in payload
+
+    @patch.object(hook.urllib.request, "urlopen")
+    def test_notify_hud_timeout_is_short(self, mock_urlopen):
+        hook.notify_hud("s", "/tmp", "Bash", {}, "/tmp/t.jsonl")
+        _, kwargs = mock_urlopen.call_args
+        assert kwargs.get("timeout", None) == 0.5
+
+    @patch.object(hook.urllib.request, "urlopen")
+    def test_notify_hud_silently_ignores_connection_error(self, mock_urlopen):
+        mock_urlopen.side_effect = ConnectionRefusedError()
+        # Should not raise
+        hook.notify_hud("s", "/tmp", "Bash", {}, "/tmp/t.jsonl")
+
+    @patch.object(hook.urllib.request, "urlopen")
+    def test_notify_hud_silently_ignores_url_error(self, mock_urlopen):
+        from urllib.error import URLError
+        mock_urlopen.side_effect = URLError("connection refused")
+        hook.notify_hud("s", "/tmp", "Bash", {}, "/tmp/t.jsonl")
+
+    def test_notify_hud_called_on_ask_user_question(self):
+        """AskUserQuestion passthrough should notify the HUD."""
+        input_data = json.dumps({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"question": "Which approach?"},
+            "cwd": "/tmp",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t.jsonl",
+        })
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("sys.stdout", io.StringIO()), \
+             patch.object(hook, "log"), \
+             patch.object(hook, "notify_hud") as mock_notify:
+            try:
+                hook.main()
+            except SystemExit:
+                pass
+        mock_notify.assert_called_once_with(
+            "sess-1", "/tmp", "AskUserQuestion",
+            {"question": "Which approach?"}, "/tmp/t.jsonl"
+        )
+
+    @patch.object(hook.subprocess, "run")
+    def test_notify_hud_called_on_tier3_ask(self, mock_run):
+        """When Claude defers (ASK), notify_hud should be called."""
+        mock_run.return_value = type("Result", (), {"stdout": "ASK", "returncode": 0})()
+        input_data = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "docker run ubuntu"},
+            "cwd": "/tmp",
+            "session_id": "sess-2",
+            "transcript_path": "/tmp/t.jsonl",
+        })
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("sys.stdout", io.StringIO()), \
+             patch.object(hook, "log"), \
+             patch.object(hook, "notify_hud") as mock_notify:
+            try:
+                hook.main()
+            except SystemExit:
+                pass
+        mock_notify.assert_called_once()
+
+    def test_notify_hud_not_called_on_parse_error(self):
+        """Parse error path should NOT notify the HUD."""
+        with patch("sys.stdin", io.StringIO("not json")), \
+             patch("sys.stdout", io.StringIO()), \
+             patch.object(hook, "log"), \
+             patch.object(hook, "notify_hud") as mock_notify:
+            try:
+                hook.main()
+            except SystemExit:
+                pass
+        mock_notify.assert_not_called()
+
+    def test_notify_hud_not_called_on_approve(self):
+        """Safe tool approvals should NOT notify the HUD."""
+        input_data = json.dumps({
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/app/main.py"},
+            "cwd": "/tmp",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/t.jsonl",
+        })
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("sys.stdout", io.StringIO()), \
+             patch.object(hook, "log"), \
+             patch.object(hook, "notify_hud") as mock_notify:
+            try:
+                hook.main()
+            except SystemExit:
+                pass
+        mock_notify.assert_not_called()

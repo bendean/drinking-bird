@@ -19,6 +19,45 @@ import sys
 import subprocess
 import os
 import re
+import urllib.request
+from datetime import datetime
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+LOG_FILE = os.path.expanduser("~/.claude/hooks/permission-hook.log")
+
+
+def log(decision: str, tool_name: str, reason: str, tool_input: dict = None):
+    """Append a log entry for every hook decision."""
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        summary = _summarize_input(tool_name, tool_input or {})
+        line = f"[{ts}] {decision:>10}  {tool_name:<20}  {summary}  ({reason})\n"
+        with open(LOG_FILE, "a") as f:
+            f.write(line)
+    except Exception:
+        pass  # Never let logging break the hook
+
+
+def _summarize_input(tool_name: str, tool_input: dict) -> str:
+    """One-line summary of what the tool is doing."""
+    if tool_name == "Bash":
+        cmd = tool_input.get("command", "")
+        if len(cmd) > 120:
+            cmd = cmd[:117] + "..."
+        return cmd
+    if tool_name in {"Read", "Write", "Edit", "MultiEdit", "Glob", "Grep"}:
+        path = tool_input.get("file_path", "") or tool_input.get("path", "") or tool_input.get("pattern", "")
+        return path
+    if tool_name == "AskUserQuestion":
+        questions = tool_input.get("questions", [])
+        if questions:
+            return questions[0].get("question", "")[:100]
+        return str(tool_input)[:100]
+    # Fallback: first 100 chars of JSON
+    return json.dumps(tool_input)[:100]
 
 # ============================================================================
 # TIER 1: Auto-approve (instant, no LLM call)
@@ -26,6 +65,14 @@ import re
 
 # Tools that are always safe (read-only operations)
 SAFE_TOOLS = {"Read", "Glob", "Grep", "LS", "WebFetch"}
+
+# Tools that require user interaction — never auto-approve or auto-deny.
+# Auto-approving these silently answers with empty input instead of showing the prompt.
+USER_INTERACTIVE_TOOLS = {"AskUserQuestion"}
+
+# Bash commands that always fall through to the normal permission prompt.
+# Use "drinking-bird-test" to verify the hook is running and prompts work.
+PASSTHROUGH_BASH_COMMANDS = {"drinking-bird-test"}
 
 # Bash commands that are always safe (prefix match)
 SAFE_BASH_PREFIXES = [
@@ -36,12 +83,11 @@ SAFE_BASH_PREFIXES = [
     "npm run build",
     "npm run dev",
     "npm run start",
-    "npx ",
     "yarn ",
     "pnpm ",
-    "node ",
-    "python ",
-    "python3 ",
+    "node --version",
+    "python3 -m pytest",
+    "python -m pytest",
     "pip list",
     "pip show",
     "git log",
@@ -198,9 +244,38 @@ def ask_user(reason="Requires manual approval"):
     sys.exit(0)
 
 
+def notify_hud(session_id, cwd, tool_name, tool_input, transcript_path):
+    """Fire-and-forget notification to drinking-bird-hud if running. Fails silently."""
+    try:
+        payload = json.dumps({
+            "session_id": session_id,
+            "cwd": cwd,
+            "tool_name": tool_name,
+            "summary": _summarize_input(tool_name, tool_input or {}),
+            "transcript_path": transcript_path,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "http://127.0.0.1:9999/notify",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=0.5)
+    except Exception:
+        pass  # HUD not running — totally fine
+
+
+# Shell meta-characters that indicate chaining, piping, or redirection.
+# Commands containing these are never auto-approved — they fall through to Tier 3.
+SHELL_META_CHARS = ["|", ";", "&&", "||", "`", "$(", ">", "<"]
+
+
 def is_safe_bash(command: str) -> bool:
     """Check if a bash command matches safe patterns."""
     cmd = command.strip()
+    # Compound/piped/redirected commands are never auto-approved.
+    if any(meta in cmd for meta in SHELL_META_CHARS):
+        return False
     if cmd in SAFE_BASH_EXACT:
         return True
     return any(cmd.startswith(prefix) for prefix in SAFE_BASH_PREFIXES)
@@ -301,69 +376,122 @@ def main():
     tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input", {})
     cwd = input_data.get("cwd", os.getcwd())
+    session_id = input_data.get("session_id", "")
+    transcript_path = input_data.get("transcript_path", "")
+
+    # --- User-interactive tools: always fall through ---
+    # These tools exist to interact with the user; auto-approving them
+    # silently swallows the prompt and returns empty input to Claude.
+    if tool_name in USER_INTERACTIVE_TOOLS:
+        reason = f"User-interactive tool: {tool_name}"
+        log("PASSTHROUGH", tool_name, reason, tool_input)
+        notify_hud(session_id, cwd, tool_name, tool_input, transcript_path)
+        ask_user(reason)
+        return
 
     # --- TIER 1: Auto-approve safe tools ---
     if tool_name in SAFE_TOOLS:
         # Check if reading sensitive files
         file_path = tool_input.get("file_path", "") or tool_input.get("path", "")
         if file_path and is_sensitive_file(file_path):
-            deny(f"Blocked read of sensitive file: {file_path}")
+            reason = f"Blocked read of sensitive file: {file_path}"
+            log("DENY", tool_name, reason, tool_input)
+            deny(reason)
             return
-        approve(f"Safe tool: {tool_name}")
+        reason = f"Safe tool: {tool_name}"
+        log("ALLOW", tool_name, reason, tool_input)
+        approve(reason)
         return
 
     # --- TIER 1/2: Bash command evaluation ---
     if tool_name == "Bash":
-        command = tool_input.get("command", "")
+        command = tool_input.get("command", "").strip()
+
+        # Test passthrough: always fall through to manual prompt
+        if command in PASSTHROUGH_BASH_COMMANDS:
+            reason = f"Test passthrough: {command}"
+            log("PASSTHROUGH", tool_name, reason, tool_input)
+            notify_hud(session_id, cwd, tool_name, tool_input, transcript_path)
+            ask_user(reason)
+            return
 
         # Tier 2: Block dangerous commands immediately
         if is_dangerous_bash(command):
-            deny(f"Blocked dangerous command: {command}")
+            reason = f"Blocked dangerous command: {command}"
+            log("DENY", tool_name, reason, tool_input)
+            deny(reason)
             return
 
         # Tier 1: Approve safe commands immediately
         if is_safe_bash(command):
-            approve(f"Safe command: {command}")
+            reason = f"Safe command: {command}"
+            log("ALLOW", tool_name, reason, tool_input)
+            approve(reason)
             return
 
         # Tier 3: Ambiguous — ask Claude
         decision = ask_claude(tool_name, tool_input, cwd)
         if decision == "allow":
-            approve("Claude approved this operation")
+            reason = "Claude approved this operation"
+            log("ALLOW", tool_name, reason, tool_input)
+            approve(reason)
         elif decision == "deny":
-            deny("Claude flagged this as unsafe")
+            reason = "Claude flagged this as unsafe"
+            log("DENY", tool_name, reason, tool_input)
+            deny(reason)
         else:
-            ask_user("Claude deferred to human judgment")
+            reason = "Claude deferred to human judgment"
+            log("PASSTHROUGH", tool_name, reason, tool_input)
+            notify_hud(session_id, cwd, tool_name, tool_input, transcript_path)
+            ask_user(reason)
         return
 
     # --- TIER 1: Auto-approve Write/Edit within project ---
     if tool_name in {"Write", "Edit", "MultiEdit"}:
         file_path = tool_input.get("file_path", "")
         if file_path and is_sensitive_file(file_path):
-            deny(f"Blocked write to sensitive file: {file_path}")
+            reason = f"Blocked write to sensitive file: {file_path}"
+            log("DENY", tool_name, reason, tool_input)
+            deny(reason)
             return
         # Auto-approve writes within the working directory
         if file_path and (file_path.startswith("./") or file_path.startswith(cwd)):
-            approve(f"Project file edit: {file_path}")
+            reason = f"Project file edit: {file_path}"
+            log("ALLOW", tool_name, reason, tool_input)
+            approve(reason)
             return
         # For writes outside project, ask Claude
         decision = ask_claude(tool_name, tool_input, cwd)
         if decision == "allow":
-            approve("Claude approved this file operation")
+            reason = "Claude approved this file operation"
+            log("ALLOW", tool_name, reason, tool_input)
+            approve(reason)
         elif decision == "deny":
-            deny("Claude flagged this file operation as unsafe")
+            reason = "Claude flagged this file operation as unsafe"
+            log("DENY", tool_name, reason, tool_input)
+            deny(reason)
         else:
-            ask_user("Claude deferred to human judgment")
+            reason = "Claude deferred to human judgment"
+            log("PASSTHROUGH", tool_name, reason, tool_input)
+            notify_hud(session_id, cwd, tool_name, tool_input, transcript_path)
+            ask_user(reason)
         return
 
     # --- TIER 3: Everything else — ask Claude ---
     decision = ask_claude(tool_name, tool_input, cwd)
     if decision == "allow":
-        approve(f"Claude approved: {tool_name}")
+        reason = f"Claude approved: {tool_name}"
+        log("ALLOW", tool_name, reason, tool_input)
+        approve(reason)
     elif decision == "deny":
-        deny(f"Claude denied: {tool_name}")
+        reason = f"Claude denied: {tool_name}"
+        log("DENY", tool_name, reason, tool_input)
+        deny(reason)
     else:
-        ask_user(f"Claude deferred: {tool_name}")
+        reason = f"Claude deferred: {tool_name}"
+        log("PASSTHROUGH", tool_name, reason, tool_input)
+        notify_hud(session_id, cwd, tool_name, tool_input, transcript_path)
+        ask_user(reason)
 
 
 if __name__ == "__main__":
