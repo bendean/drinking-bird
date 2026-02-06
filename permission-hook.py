@@ -142,15 +142,19 @@ DANGEROUS_BASH_PATTERNS = [
     "ncat -e ",
 ]
 
-# Environment/secret file patterns to block reading
-SENSITIVE_FILE_PATTERNS = [
+# Substring patterns — match anywhere in the path
+SENSITIVE_PATH_PATTERNS = [
     ".env",
     ".env.",
     "secrets/",
-    "credentials",
     ".aws/credentials",
     ".ssh/id_",
     ".gnupg/",
+]
+
+# Basename patterns — match against filename only (exact name or name without extension)
+SENSITIVE_BASENAME_PATTERNS = [
+    "credentials",
     "token",
     "api_key",
     "apikey",
@@ -219,7 +223,20 @@ def is_dangerous_bash(command: str) -> bool:
 def is_sensitive_file(path: str) -> bool:
     """Check if a file path looks like it contains secrets."""
     path_lower = path.lower()
-    return any(pattern in path_lower for pattern in SENSITIVE_FILE_PATTERNS)
+    # Substring patterns (path components like .env, secrets/)
+    if any(pattern in path_lower for pattern in SENSITIVE_PATH_PATTERNS):
+        return True
+    # Basename patterns — check filename without extension
+    basename = os.path.basename(path_lower)
+    name_no_ext = os.path.splitext(basename)[0]
+    # Also handle dotfiles like .token -> token
+    basename_no_dot = basename.lstrip(".")
+    name_no_ext_no_dot = name_no_ext.lstrip(".")
+    if any(name_no_ext == pattern or basename == pattern
+           or basename_no_dot == pattern or name_no_ext_no_dot == pattern
+           for pattern in SENSITIVE_BASENAME_PATTERNS):
+        return True
+    return False
 
 
 def ask_claude(tool_name: str, tool_input: dict, cwd: str) -> str:

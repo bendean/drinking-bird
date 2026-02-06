@@ -214,16 +214,25 @@ class TestIsSensitiveFile:
     def test_secrets_dir(self):
         assert hook.is_sensitive_file("/app/secrets/db-password.txt") is True
 
-    # BUG PROBES: Overly broad matching — documenting current behavior
-    def test_tokenizer_false_positive(self):
-        """'token' pattern matches tokenizer.py — this is a false positive."""
-        result = hook.is_sensitive_file("/app/src/tokenizer.py")
-        assert result is True  # KNOWN BUG — "token" is too broad. See Task 9.
+    # These were previously false positives — now fixed
+    def test_tokenizer_not_sensitive(self):
+        assert hook.is_sensitive_file("/app/src/tokenizer.py") is False
 
-    def test_api_key_validator_false_positive(self):
-        """'api_key' pattern matches test_api_key_validation.py."""
-        result = hook.is_sensitive_file("/app/tests/test_api_key_validation.py")
-        assert result is True  # KNOWN BUG — too broad. See Task 9.
+    def test_api_key_validator_not_sensitive(self):
+        assert hook.is_sensitive_file("/app/tests/test_api_key_validation.py") is False
+
+    # These SHOULD still match
+    def test_token_file(self):
+        assert hook.is_sensitive_file("/app/.token") is True
+
+    def test_api_key_file(self):
+        assert hook.is_sensitive_file("/app/config/api_key") is True
+
+    def test_api_key_json(self):
+        assert hook.is_sensitive_file("/app/api_key.json") is True
+
+    def test_apikey_txt(self):
+        assert hook.is_sensitive_file("/app/apikey.txt") is True
 
     # True negatives
     def test_normal_python_file(self):
