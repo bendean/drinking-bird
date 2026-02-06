@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 # Import the hook script as a module (it's not a package)
-HOOK_PATH = Path(__file__).parent.parent / "permission-hook.py"
+HOOK_PATH = Path(__file__).parent.parent / "hooks" / "permission-hook.py"
 
 
 def load_hook():

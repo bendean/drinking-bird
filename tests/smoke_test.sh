@@ -2,7 +2,7 @@
 # Smoke test: pipe JSON to the hook and check output
 set -euo pipefail
 
-HOOK="python3 $(dirname "$0")/../permission-hook.py"
+HOOK="python3 $(dirname "$0")/../hooks/permission-hook.py"
 PASS=0
 FAIL=0
 
