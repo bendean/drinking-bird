@@ -231,3 +231,190 @@ class TestIsSensitiveFile:
 
     def test_package_json(self):
         assert hook.is_sensitive_file("/app/package.json") is False
+
+
+# ============================================================================
+# Task 6: Integration tests for main() — Tier 1 and Tier 2
+# ============================================================================
+
+
+def run_hook_capture(tool_name, tool_input=None, cwd="/home/user/project"):
+    """Helper: run main() with mocked stdin, return parsed JSON output."""
+    input_data = json.dumps({
+        "tool_name": tool_name,
+        "tool_input": tool_input or {},
+        "cwd": cwd,
+    })
+    captured = io.StringIO()
+    with patch("sys.stdin", io.StringIO(input_data)), \
+         patch("sys.stdout", captured):
+        try:
+            hook.main()
+        except SystemExit:
+            pass
+    return json.loads(captured.getvalue())
+
+
+class TestMainTier1:
+    """Integration tests for Tier 1 auto-approve via main()."""
+
+    def test_safe_tool_read(self):
+        result = run_hook_capture("Read", {"file_path": "/app/src/main.py"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    def test_safe_tool_glob(self):
+        result = run_hook_capture("Glob", {"pattern": "**/*.py"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    def test_safe_tool_grep(self):
+        result = run_hook_capture("Grep", {"pattern": "TODO"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    def test_safe_bash_git_status(self):
+        result = run_hook_capture("Bash", {"command": "git status"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    def test_safe_bash_pytest(self):
+        result = run_hook_capture("Bash", {"command": "pytest"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    def test_safe_bash_npm_run_build(self):
+        result = run_hook_capture("Bash", {"command": "npm run build"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    def test_write_within_project(self):
+        result = run_hook_capture(
+            "Write",
+            {"file_path": "/home/user/project/src/new.py"},
+            cwd="/home/user/project",
+        )
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    def test_edit_within_project(self):
+        result = run_hook_capture(
+            "Edit",
+            {"file_path": "/home/user/project/src/app.py"},
+            cwd="/home/user/project",
+        )
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+
+class TestMainTier2:
+    """Integration tests for Tier 2 auto-deny via main()."""
+
+    def test_dangerous_bash_rm_rf(self):
+        result = run_hook_capture("Bash", {"command": "rm -rf /"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+
+    def test_dangerous_bash_sudo_rm(self):
+        result = run_hook_capture("Bash", {"command": "sudo rm /etc/hosts"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+
+    def test_read_sensitive_file(self):
+        result = run_hook_capture("Read", {"file_path": "/app/.env"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+
+    def test_write_sensitive_file(self):
+        result = run_hook_capture("Write", {"file_path": "/app/.env.local"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+
+    def test_read_ssh_key(self):
+        result = run_hook_capture("Read", {"file_path": "/home/user/.ssh/id_rsa"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+
+
+# ============================================================================
+# Task 7: Integration tests for main() — Tier 3 and edge cases
+# ============================================================================
+
+
+class TestMainTier3:
+    """Integration tests for Tier 3 — Claude evaluation via subprocess."""
+
+    @patch.object(hook.subprocess, "run")
+    def test_ambiguous_bash_claude_allows(self, mock_run):
+        mock_run.return_value = type("Result", (), {"stdout": "ALLOW", "returncode": 0})()
+        result = run_hook_capture("Bash", {"command": "docker run ubuntu"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+        mock_run.assert_called_once()
+
+    @patch.object(hook.subprocess, "run")
+    def test_ambiguous_bash_claude_denies(self, mock_run):
+        mock_run.return_value = type("Result", (), {"stdout": "DENY", "returncode": 0})()
+        result = run_hook_capture("Bash", {"command": "docker run --privileged ubuntu"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+
+    @patch.object(hook.subprocess, "run")
+    def test_ambiguous_bash_claude_asks(self, mock_run):
+        mock_run.return_value = type("Result", (), {"stdout": "ASK", "returncode": 0})()
+        result = run_hook_capture("Bash", {"command": "docker run ubuntu"})
+        assert result == {}  # Falls through to manual
+
+    @patch.object(hook.subprocess, "run")
+    def test_claude_timeout_falls_through(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=15)
+        result = run_hook_capture("Bash", {"command": "docker run ubuntu"})
+        assert result == {}  # Falls through
+
+    @patch.object(hook.subprocess, "run")
+    def test_claude_not_found_falls_through(self, mock_run):
+        mock_run.side_effect = FileNotFoundError()
+        result = run_hook_capture("Bash", {"command": "docker run ubuntu"})
+        assert result == {}  # Falls through
+
+    @patch.object(hook.subprocess, "run")
+    def test_unknown_tool_goes_to_claude(self, mock_run):
+        mock_run.return_value = type("Result", (), {"stdout": "ALLOW", "returncode": 0})()
+        result = run_hook_capture("SomeNewTool", {"action": "do stuff"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    @patch.object(hook.subprocess, "run")
+    def test_write_outside_project_goes_to_claude(self, mock_run):
+        mock_run.return_value = type("Result", (), {"stdout": "DENY", "returncode": 0})()
+        result = run_hook_capture(
+            "Write",
+            {"file_path": "/etc/hosts"},
+            cwd="/home/user/project",
+        )
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+
+
+class TestMainEdgeCases:
+    """Edge cases and error handling."""
+
+    def test_invalid_json_stdin(self):
+        captured = io.StringIO()
+        with patch("sys.stdin", io.StringIO("not json")), \
+             patch("sys.stdout", captured):
+            try:
+                hook.main()
+            except SystemExit:
+                pass
+        output = json.loads(captured.getvalue())
+        assert output == {}  # Falls through
+
+    def test_empty_stdin(self):
+        captured = io.StringIO()
+        with patch("sys.stdin", io.StringIO("")), \
+             patch("sys.stdout", captured):
+            try:
+                hook.main()
+            except SystemExit:
+                pass
+        output = json.loads(captured.getvalue())
+        assert output == {}
+
+    @patch.object(hook.subprocess, "run")
+    def test_missing_tool_name(self, mock_run):
+        """No tool_name defaults to '' which goes to Tier 3."""
+        mock_run.return_value = type("Result", (), {"stdout": "ASK", "returncode": 0})()
+        input_data = json.dumps({"tool_input": {}, "cwd": "/tmp"})
+        captured = io.StringIO()
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("sys.stdout", captured):
+            try:
+                hook.main()
+            except SystemExit:
+                pass
+        result = json.loads(captured.getvalue())
+        assert result == {}
