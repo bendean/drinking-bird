@@ -68,7 +68,8 @@ SAFE_TOOLS = {"Read", "Glob", "Grep", "LS", "WebFetch"}
 
 # Tools that require user interaction — never auto-approve or auto-deny.
 # Auto-approving these silently answers with empty input instead of showing the prompt.
-USER_INTERACTIVE_TOOLS = {"AskUserQuestion"}
+# EnterPlanMode/ExitPlanMode: user must consent to plan mode and approve plans.
+USER_INTERACTIVE_TOOLS = {"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"}
 
 # Bash commands that always fall through (log-level verification only).
 # Note: passthrough can't force a visible prompt — session permissions take over.
