@@ -1,7 +1,7 @@
 {
   "name": "drinking-bird",
-  "description": "Routes Claude Code permission requests through a tiered approval system: auto-approve safe ops, auto-deny dangerous ops, ask Claude for ambiguous cases",
-  "version": "0.1.0",
+  "description": "Tiered permission approval and smart session-idle notifications for Claude Code",
+  "version": "0.2.0",
   "author": {
     "name": "Ben"
   },

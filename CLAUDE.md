@@ -1,10 +1,11 @@
 # Drinking Bird
 
-A Claude Code `PermissionRequest` hook that auto-approves safe operations, auto-denies dangerous ones, and routes ambiguous cases to Claude via `claude -p`.
+Claude Code hooks for smart permission handling and session-idle detection. The `PermissionRequest` hook auto-approves safe operations, auto-denies dangerous ones, and routes ambiguous cases to Claude via `claude -p`. The `Stop` hook detects when Claude needs user attention and notifies the HUD.
 
 ## Project Structure
 
-- `hooks/permission-hook.py` — main hook script with 3-tier logic (safe/dangerous/ambiguous)
+- `hooks/permission-hook.py` — permission hook with 3-tier logic (safe/dangerous/ambiguous)
+- `hooks/stop-hook.py` — stop hook for session-idle detection (NOTIFY/SILENT)
 - `install.sh` / `uninstall.sh` — global install to `~/.claude/hooks/` and config merge into `~/.claude/settings.json`
 - `.claude-plugin/plugin.json` + `hooks/hooks.json` — Claude Code plugin distribution format
 - `tests/` — pytest unit tests
@@ -17,6 +18,16 @@ A Claude Code `PermissionRequest` hook that auto-approves safe operations, auto-
 3. **Tier 3 (~2-5s)**: Everything else goes to `claude -p` which returns ALLOW/DENY/ASK
 4. **Fallback**: If Claude can't decide, times out, or errors, fall through to normal permission prompt
 
+## Stop Hook (session-idle detection)
+
+The stop hook (`hooks/stop-hook.py`) fires when Claude finishes each turn:
+1. Reads the last assistant message from the transcript JSONL
+2. Classifies via `claude -p`: NOTIFY (user needs to act) or SILENT (informational)
+3. If NOTIFY, POSTs to `http://127.0.0.1:9999/session-idle` for the HUD
+4. Logs all decisions to `~/.claude/hooks/stop-hook.log`
+
+Edge cases: empty transcript = SILENT, claude timeout = NOTIFY (over-alert), HUD not running = silent failure.
+
 ## Development
 
 ```bash
@@ -25,7 +36,7 @@ python3 -m pytest tests/
 
 ## Installation
 
-The hook installs globally to `~/.claude/hooks/permission-hook.py`. Run `./install.sh` to install or `./uninstall.sh` to remove.
+The hooks install globally to `~/.claude/hooks/`. Run `./install.sh` to install or `./uninstall.sh` to remove.
 
 ## Testing the hook
 
