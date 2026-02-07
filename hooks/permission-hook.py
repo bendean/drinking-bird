@@ -166,11 +166,10 @@ SAFE_BASH_EXACT = {
 # TIER 2: Auto-deny (instant, no LLM call)
 # ============================================================================
 
-# Bash patterns that are always blocked
+# Bash patterns that are always blocked (simple substring match).
+# Note: "rm -rf /" and "rm -rf ~" are handled by regex in is_dangerous_bash()
+# to avoid false positives on paths like "rm -rf /tmp/foo".
 DANGEROUS_BASH_PATTERNS = [
-    "rm -rf /",
-    "rm -rf ~",
-    "rm -rf $HOME",
     "rm -rf /*",
     "sudo rm ",
     "sudo chmod ",
@@ -350,6 +349,15 @@ def is_dangerous_bash(command: str) -> bool:
     """Check if a bash command matches dangerous patterns."""
     cmd = command.strip().lower()
     if any(pattern in cmd for pattern in DANGEROUS_BASH_PATTERNS):
+        return True
+    # Path-boundary checks for rm -rf with root/home targets.
+    # Uses negative lookahead so "rm -rf /tmp/foo" is NOT matched,
+    # but "rm -rf /", "rm -rf / ", "rm -rf /;" ARE matched.
+    if re.search(r"\brm\s+-rf\s+/(?![a-z0-9._\-])", cmd):
+        return True
+    if re.search(r"\brm\s+-rf\s+~(?!/[a-z0-9._\-])", cmd):
+        return True
+    if re.search(r"\brm\s+-rf\s+\$home(?!/[a-z0-9._\-])", cmd):
         return True
     # Pipe-chain detection: curl/wget ... | sh/bash
     if re.search(r"\b(curl|wget)\b.*\|\s*(sh|bash)\b", cmd):

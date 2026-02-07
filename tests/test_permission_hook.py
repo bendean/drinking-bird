@@ -216,6 +216,38 @@ class TestIsDangerousBash:
     def test_case_insensitive_sudo(self):
         assert hook.is_dangerous_bash("SUDO RM /etc/hosts") is True
 
+    # rm -rf with specific paths should NOT be dangerous (path boundary check)
+    def test_rm_rf_tmp_not_dangerous(self):
+        assert hook.is_dangerous_bash("rm -rf /tmp/foo") is False
+
+    def test_rm_rf_var_log_not_dangerous(self):
+        assert hook.is_dangerous_bash("rm -rf /var/log/old-stuff") is False
+
+    def test_rm_rf_home_subdir_not_dangerous(self):
+        assert hook.is_dangerous_bash("rm -rf ~/some-project") is False
+
+    def test_rm_rf_home_slash_subdir_not_dangerous(self):
+        assert hook.is_dangerous_bash("rm -rf $HOME/tmp-dir") is False
+
+    # rm -rf root/home variants that ARE dangerous
+    def test_rm_rf_root_trailing_space(self):
+        assert hook.is_dangerous_bash("rm -rf / --no-preserve-root") is True
+
+    def test_rm_rf_root_semicolon(self):
+        assert hook.is_dangerous_bash("rm -rf /; echo done") is True
+
+    def test_rm_rf_home_slash(self):
+        assert hook.is_dangerous_bash("rm -rf ~/") is True
+
+    def test_rm_rf_home_glob(self):
+        assert hook.is_dangerous_bash("rm -rf ~/*") is True
+
+    def test_rm_rf_home_var_bare(self):
+        assert hook.is_dangerous_bash("rm -rf $HOME") is True
+
+    def test_rm_rf_home_var_slash(self):
+        assert hook.is_dangerous_bash("rm -rf $HOME/") is True
+
     # Safe commands should NOT be flagged as dangerous
     def test_git_status_not_dangerous(self):
         assert hook.is_dangerous_bash("git status") is False
