@@ -70,8 +70,9 @@ SAFE_TOOLS = {"Read", "Glob", "Grep", "LS", "WebFetch"}
 # Auto-approving these silently answers with empty input instead of showing the prompt.
 USER_INTERACTIVE_TOOLS = {"AskUserQuestion"}
 
-# Bash commands that always fall through to the normal permission prompt.
-# Use "drinking-bird-test" to verify the hook is running and prompts work.
+# Bash commands that always fall through (log-level verification only).
+# Note: passthrough can't force a visible prompt — session permissions take over.
+# For a visible test, use AskUserQuestion instead (say "run drinking-bird-test").
 PASSTHROUGH_BASH_COMMANDS = {"drinking-bird-test"}
 
 # Bash commands that are always safe (prefix match)

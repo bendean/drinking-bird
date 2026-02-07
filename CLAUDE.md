@@ -27,9 +27,27 @@ python3 -m pytest tests/
 
 The hook installs globally to `~/.claude/hooks/permission-hook.py`. Run `./install.sh` to install or `./uninstall.sh` to remove.
 
+## Testing the hook
+
+Say "run drinking-bird-test" to verify the hook is running. This triggers an `AskUserQuestion` prompt that always reaches the user (can't be session-cached). The hook logs it as PASSTHROUGH, confirming it fired.
+
+You can also check the log directly:
+```bash
+tail -5 ~/.claude/hooks/permission-hook.log
+```
+
+Note: Bash-based test commands (`PASSTHROUGH_BASH_COMMANDS`) only verify via logs — they can't force a visible prompt because Claude Code defers to existing session permissions when a hook returns no decision.
+
+## Drinking Bird HUD (optional)
+
+The sibling project `../drinking-bird-hud` is a macOS menu bar app that shows pending permission requests. This hook notifies the HUD via `notify_hud()` — a fire-and-forget POST to `http://127.0.0.1:9999/notify` with `{session_id, cwd, tool_name, summary, transcript_path}`. The call has a 0.5s timeout and fails silently if the HUD isn't running.
+
+The HUD is notified on every PASSTHROUGH decision (user-interactive tools, Tier 3 deferrals, test passthroughs). It is never notified on ALLOW or DENY.
+
 ## Known behaviors
 
 - PermissionRequest hooks that auto-approve are silent — no user-visible feedback in the terminal
 - The `message` field in hook decisions is only meaningful for `deny` (fed to Claude, not user-visible)
 - Tier 3 evaluations cause the permission prompt to briefly flash in the UI while the hook evaluates
+- Hook passthrough (`{}` response) defers to session permissions — it cannot force a prompt if Bash is already approved
 - The hook may not appear in `/hooks` output but still fires correctly
