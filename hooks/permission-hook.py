@@ -245,6 +245,36 @@ def ask_user(reason="Requires manual approval"):
     sys.exit(0)
 
 
+def notify_hud_hook_start(session_id):
+    """Tell HUD the permission hook is evaluating. Fire-and-forget."""
+    try:
+        payload = json.dumps({"session_id": session_id}).encode("utf-8")
+        req = urllib.request.Request(
+            "http://127.0.0.1:9999/hook-start",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=0.3)
+    except Exception:
+        pass
+
+
+def notify_hud_tier3(session_id):
+    """Tell HUD the hook escalated to Tier 3 (Claude evaluation). Fire-and-forget."""
+    try:
+        payload = json.dumps({"session_id": session_id}).encode("utf-8")
+        req = urllib.request.Request(
+            "http://127.0.0.1:9999/hook-tier3",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=0.3)
+    except Exception:
+        pass
+
+
 def notify_hud(session_id, cwd, tool_name, tool_input, transcript_path):
     """Fire-and-forget notification to drinking-bird-hud if running. Fails silently."""
     try:
@@ -380,6 +410,9 @@ def main():
     session_id = input_data.get("session_id", "")
     transcript_path = input_data.get("transcript_path", "")
 
+    # Signal HUD that hook is evaluating (amber flash)
+    notify_hud_hook_start(session_id)
+
     # --- User-interactive tools: always fall through ---
     # These tools exist to interact with the user; auto-approving them
     # silently swallows the prompt and returns empty input to Claude.
@@ -431,6 +464,7 @@ def main():
             return
 
         # Tier 3: Ambiguous — ask Claude
+        notify_hud_tier3(session_id)
         decision = ask_claude(tool_name, tool_input, cwd)
         if decision == "allow":
             reason = "Claude approved this operation"
@@ -462,6 +496,7 @@ def main():
             approve(reason)
             return
         # For writes outside project, ask Claude
+        notify_hud_tier3(session_id)
         decision = ask_claude(tool_name, tool_input, cwd)
         if decision == "allow":
             reason = "Claude approved this file operation"
@@ -479,6 +514,7 @@ def main():
         return
 
     # --- TIER 3: Everything else — ask Claude ---
+    notify_hud_tier3(session_id)
     decision = ask_claude(tool_name, tool_input, cwd)
     if decision == "allow":
         reason = f"Claude approved: {tool_name}"
