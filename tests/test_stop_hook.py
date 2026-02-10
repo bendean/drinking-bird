@@ -190,7 +190,7 @@ class TestClassifyMessage:
         mock_run.return_value = MagicMock(stdout="SILENT", returncode=0)
         long_message = "x" * 1000
         hook.classify_message(long_message)
-        prompt_arg = mock_run.call_args[0][0][2]  # ["claude", "-p", prompt]
+        prompt_arg = mock_run.call_args[0][0][-1]  # last arg is the prompt
         assert "x" * 500 + "..." in prompt_arg
         assert "x" * 501 not in prompt_arg
 

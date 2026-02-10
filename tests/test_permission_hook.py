@@ -349,7 +349,10 @@ def run_hook_capture(tool_name, tool_input=None, cwd="/home/user/project",
     with patch("sys.stdin", io.StringIO(input_data)), \
          patch("sys.stdout", captured), \
          patch.object(hook, "log"), \
-         patch.object(hook, "notify_hud"):
+         patch.object(hook, "get_tty", return_value="/dev/test-tty"), \
+         patch.object(hook, "notify_hud"), \
+         patch.object(hook, "notify_hud_hook_start"), \
+         patch.object(hook, "notify_hud_tier3"):
         try:
             hook.main()
         except SystemExit:
@@ -628,14 +631,16 @@ class TestNotifyHud:
         with patch("sys.stdin", io.StringIO(input_data)), \
              patch("sys.stdout", io.StringIO()), \
              patch.object(hook, "log"), \
-             patch.object(hook, "notify_hud") as mock_notify:
+             patch.object(hook, "get_tty", return_value="/dev/test-tty"), \
+             patch.object(hook, "notify_hud") as mock_notify, \
+             patch.object(hook, "notify_hud_hook_start"):
             try:
                 hook.main()
             except SystemExit:
                 pass
         mock_notify.assert_called_once_with(
             "sess-1", "/tmp", "AskUserQuestion",
-            {"question": "Which approach?"}, "/tmp/t.jsonl"
+            {"question": "Which approach?"}, "/tmp/t.jsonl", "/dev/test-tty"
         )
 
     @patch.object(hook.subprocess, "run")

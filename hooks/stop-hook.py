@@ -150,7 +150,7 @@ Respond with EXACTLY one word: NOTIFY or SILENT
 
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt],
+            ["claude", "-p", "--no-session-persistence", prompt],
             capture_output=True,
             text=True,
             timeout=10,
