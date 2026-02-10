@@ -403,6 +403,10 @@ class TestMainTier1:
         )
         assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
 
+    def test_safe_tool_web_search(self):
+        result = run_hook_capture("WebSearch", {"query": "python asyncio tutorial"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
 
 class TestMainTier2:
     """Integration tests for Tier 2 auto-deny via main()."""
@@ -557,6 +561,26 @@ class TestUserInteractiveTools:
         run_hook_capture("AskUserQuestion", {
             "question": "Which approach?",
         })
+        mock_run.assert_not_called()
+
+
+class TestMcpTools:
+    """MCP tools must always fall through — external integrations with
+    unpredictable side effects that Tier 3 Claude rubber-stamps."""
+
+    def test_mcp_tool_falls_through(self):
+        result = run_hook_capture("mcp__XcodeBuildMCP__tap", {"x": 201, "y": 495})
+        assert result == {}
+
+    def test_mcp_read_only_tool_still_falls_through(self):
+        """Even read-only-looking MCP tools should fall through."""
+        result = run_hook_capture("mcp__corbo__corbo_search", {"query": "test"})
+        assert result == {}
+
+    @patch.object(hook.subprocess, "run")
+    def test_mcp_tool_never_calls_claude(self, mock_run):
+        """MCP tools should bypass Tier 3 entirely."""
+        run_hook_capture("mcp__XcodeBuildMCP__type_text", {"text": "hello"})
         mock_run.assert_not_called()
 
 

@@ -64,7 +64,7 @@ def _summarize_input(tool_name: str, tool_input: dict) -> str:
 # ============================================================================
 
 # Tools that are always safe (read-only operations)
-SAFE_TOOLS = {"Read", "Glob", "Grep", "LS", "WebFetch"}
+SAFE_TOOLS = {"Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch"}
 
 # Tools that require user interaction — never auto-approve or auto-deny.
 # Auto-approving these silently answers with empty input instead of showing the prompt.
@@ -463,6 +463,16 @@ def main():
     # silently swallows the prompt and returns empty input to Claude.
     if tool_name in USER_INTERACTIVE_TOOLS:
         reason = f"User-interactive tool: {tool_name}"
+        log("PASSTHROUGH", tool_name, reason, tool_input)
+        notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty)
+        ask_user(reason)
+        return
+
+    # --- MCP tools: always fall through ---
+    # MCP tools are external integrations with unpredictable side effects.
+    # Tier 3 Claude rubber-stamps them, so let the user decide.
+    if tool_name.startswith("mcp__"):
+        reason = f"MCP tool: {tool_name}"
         log("PASSTHROUGH", tool_name, reason, tool_input)
         notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty)
         ask_user(reason)
