@@ -22,6 +22,11 @@ import re
 import urllib.request
 from datetime import datetime
 
+CREDENTIAL_PATTERN = re.compile(
+    r"(PASSWORD|SECRET|TOKEN|API_KEY|APIKEY|DB_PASSWORD|PRIVATE_KEY)=[^\s]+",
+    re.IGNORECASE,
+)
+
 # ============================================================================
 # LOGGING
 # ============================================================================
@@ -41,13 +46,18 @@ def log(decision: str, tool_name: str, reason: str, tool_input: dict = None):
         pass  # Never let logging break the hook
 
 
+def _redact_credentials(text: str) -> str:
+    """Replace credential values with *** in log output."""
+    return CREDENTIAL_PATTERN.sub(lambda m: m.group().split("=", 1)[0] + "=***", text)
+
+
 def _summarize_input(tool_name: str, tool_input: dict) -> str:
     """One-line summary of what the tool is doing."""
     if tool_name == "Bash":
         cmd = tool_input.get("command", "")
         if len(cmd) > 120:
             cmd = cmd[:117] + "..."
-        return cmd
+        return _redact_credentials(cmd.replace("\n", " "))
     if tool_name in {"Read", "Write", "Edit", "MultiEdit", "Glob", "Grep"}:
         path = tool_input.get("file_path", "") or tool_input.get("path", "") or tool_input.get("pattern", "")
         return path
@@ -57,7 +67,7 @@ def _summarize_input(tool_name: str, tool_input: dict) -> str:
             return questions[0].get("question", "")[:100]
         return str(tool_input)[:100]
     # Fallback: first 100 chars of JSON
-    return json.dumps(tool_input)[:100]
+    return _redact_credentials(json.dumps(tool_input)[:100].replace("\n", " "))
 
 # ============================================================================
 # TIER 1: Auto-approve (instant, no LLM call)
@@ -75,6 +85,16 @@ USER_INTERACTIVE_TOOLS = {"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"}
 # Note: passthrough can't force a visible prompt — session permissions take over.
 # For a visible test, use AskUserQuestion instead (say "run drinking-bird-test").
 PASSTHROUGH_BASH_COMMANDS = {"drinking-bird-test"}
+
+# Bash patterns that always require user confirmation — never auto-approved or auto-denied.
+ALWAYS_ASK_BASH_PATTERNS = [
+    "git commit",
+    "git push",
+    "git merge",
+    "osascript",
+    "pkill ",
+    "kill ",
+]
 
 # Bash commands that are always safe (prefix match)
 SAFE_BASH_PREFIXES = [
@@ -145,6 +165,22 @@ SAFE_BASH_PREFIXES = [
     "mypy ",
     "flake8 ",
     "rustfmt ",
+    "swift --version",
+    "xcodebuild -version",
+    "flutter --version",
+    "java --version",
+    "ruby --version",
+    "python3 --version",
+    "python --version",
+    "brew list",
+    "brew info",
+    "brew --version",
+    "lsof ",
+    "id ",
+    "strings ",
+    "claude mcp list",
+    "claude help",
+    "claude skills",
 ]
 
 # Exact-match safe bash commands
@@ -160,6 +196,9 @@ SAFE_BASH_EXACT = {
     "git branch",
     "npm test",
     "pytest",
+    "sw_vers",
+    "uname -a",
+    "brew list",
 }
 
 # ============================================================================
@@ -340,6 +379,9 @@ def is_safe_bash(command: str) -> bool:
     # Compound/piped/redirected commands are never auto-approved.
     if any(meta in cmd for meta in SHELL_META_CHARS):
         return False
+    # Generic --version / -version is always safe
+    if cmd.endswith(" --version") or cmd.endswith(" -version") or cmd == "--version":
+        return True
     if cmd in SAFE_BASH_EXACT:
         return True
     return any(cmd.startswith(prefix) for prefix in SAFE_BASH_PREFIXES)
@@ -499,6 +541,14 @@ def main():
         # Test passthrough: always fall through to manual prompt
         if command in PASSTHROUGH_BASH_COMMANDS:
             reason = f"Test passthrough: {command}"
+            log("PASSTHROUGH", tool_name, reason, tool_input)
+            notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty)
+            ask_user(reason)
+            return
+
+        # Always-ask: commands that require user confirmation every time
+        if any(pattern in command for pattern in ALWAYS_ASK_BASH_PATTERNS):
+            reason = f"Always-ask pattern: {command}"
             log("PASSTHROUGH", tool_name, reason, tool_input)
             notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty)
             ask_user(reason)

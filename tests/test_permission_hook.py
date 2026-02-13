@@ -718,3 +718,145 @@ class TestNotifyHud:
             except SystemExit:
                 pass
         mock_notify.assert_not_called()
+
+
+# ============================================================================
+# Tests for _summarize_input() — newline and credential redaction
+# ============================================================================
+
+
+class TestSummarizeInput:
+    """_summarize_input() should produce single-line, redacted output."""
+
+    def test_bash_newline_replaced(self):
+        result = hook._summarize_input("Bash", {"command": "echo hello\necho world"})
+        assert "\n" not in result
+        assert "echo hello echo world" in result
+
+    def test_bash_credential_redacted(self):
+        result = hook._summarize_input("Bash", {"command": "export PASSWORD=hunter2"})
+        assert "hunter2" not in result
+        assert "PASSWORD=***" in result
+
+    def test_bash_multiple_credentials_redacted(self):
+        result = hook._summarize_input("Bash", {
+            "command": "TOKEN=abc123 API_KEY=xyz SECRET=shh"
+        })
+        assert "abc123" not in result
+        assert "xyz" not in result
+        assert "shh" not in result
+        assert "TOKEN=***" in result
+        assert "API_KEY=***" in result
+        assert "SECRET=***" in result
+
+    def test_bash_case_insensitive_redaction(self):
+        result = hook._summarize_input("Bash", {"command": "password=mypass"})
+        assert "mypass" not in result
+        assert "password=***" in result
+
+    def test_bash_normal_command_unchanged(self):
+        result = hook._summarize_input("Bash", {"command": "git status"})
+        assert result == "git status"
+
+    def test_fallback_newline_replaced(self):
+        result = hook._summarize_input("SomeTool", {"key": "line1\nline2"})
+        assert "\n" not in result
+
+    def test_fallback_credential_redacted(self):
+        result = hook._summarize_input("SomeTool", {"cmd": "DB_PASSWORD=secret123"})
+        assert "secret123" not in result
+        assert "DB_PASSWORD=***" in result
+
+    def test_read_tool_returns_path(self):
+        result = hook._summarize_input("Read", {"file_path": "/app/main.py"})
+        assert result == "/app/main.py"
+
+
+# ============================================================================
+# Tests for ALWAYS_ASK_BASH_PATTERNS
+# ============================================================================
+
+
+class TestAlwaysAskBashPatterns:
+    """Commands matching ALWAYS_ASK_BASH_PATTERNS always fall through to user."""
+
+    def test_git_commit_falls_through(self):
+        result = run_hook_capture("Bash", {"command": "git commit -m 'fix bug'"})
+        assert result == {}
+
+    def test_git_push_falls_through(self):
+        result = run_hook_capture("Bash", {"command": "git push origin main"})
+        assert result == {}
+
+    def test_git_merge_falls_through(self):
+        result = run_hook_capture("Bash", {"command": "git merge feature-branch"})
+        assert result == {}
+
+    def test_osascript_falls_through(self):
+        result = run_hook_capture("Bash", {"command": "osascript -e 'tell app'"})
+        assert result == {}
+
+    def test_pkill_falls_through(self):
+        result = run_hook_capture("Bash", {"command": "pkill node"})
+        assert result == {}
+
+    def test_kill_falls_through(self):
+        result = run_hook_capture("Bash", {"command": "kill 12345"})
+        assert result == {}
+
+    def test_git_log_not_caught(self):
+        """git log should NOT match always-ask (it's safe)."""
+        result = run_hook_capture("Bash", {"command": "git log --oneline"})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    @patch.object(hook.subprocess, "run")
+    def test_git_commit_never_calls_claude(self, mock_run):
+        """Always-ask should bypass Tier 3 entirely."""
+        run_hook_capture("Bash", {"command": "git commit -m 'msg'"})
+        mock_run.assert_not_called()
+
+
+# ============================================================================
+# Extended tests for is_safe_bash() — new additions
+# ============================================================================
+
+
+class TestIsSafeBashExtended:
+    """Additional safe bash command tests for new prefixes and --version."""
+
+    def test_sw_vers_exact(self):
+        assert hook.is_safe_bash("sw_vers") is True
+
+    def test_uname_a_exact(self):
+        assert hook.is_safe_bash("uname -a") is True
+
+    def test_brew_list_exact(self):
+        assert hook.is_safe_bash("brew list") is True
+
+    def test_brew_list_prefix(self):
+        assert hook.is_safe_bash("brew list --formula") is True
+
+    def test_brew_info_prefix(self):
+        assert hook.is_safe_bash("brew info node") is True
+
+    def test_swift_version(self):
+        assert hook.is_safe_bash("swift --version") is True
+
+    def test_lsof_prefix(self):
+        assert hook.is_safe_bash("lsof -i :8080") is True
+
+    def test_claude_mcp_list(self):
+        assert hook.is_safe_bash("claude mcp list") is True
+
+    def test_generic_version_flag(self):
+        assert hook.is_safe_bash("rustc --version") is True
+
+    def test_generic_version_flag_dash(self):
+        assert hook.is_safe_bash("java -version") is True
+
+    def test_bare_version(self):
+        assert hook.is_safe_bash("--version") is True
+
+    def test_piped_version_still_blocked(self):
+        """Piped commands should NOT be auto-approved even with --version."""
+        assert hook.is_safe_bash("node --version | grep v18") is False

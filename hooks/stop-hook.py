@@ -169,6 +169,74 @@ Respond with EXACTLY one word: NOTIFY or SILENT
 
 
 # ============================================================================
+# LOCAL CLASSIFICATION (skip Claude for obvious cases)
+# ============================================================================
+
+COMPLETION_PREFIXES = [
+    "Done.", "Done!", "Committed", "Created", "Updated", "Deleted",
+    "Fixed", "Added", "Removed", "Merged", "Pushed", "Deployed",
+    "Installed", "Built", "Passed", "Completed", "Finished",
+    "All tests pass", "All done",
+]
+
+
+def classify_local(last_message: str):
+    """Fast local classification. Returns 'NOTIFY', 'SILENT', or None (fall through to Claude)."""
+    if not last_message or not last_message.strip():
+        return None
+    text = last_message.strip()
+    # Question mark anywhere = user needs to respond
+    if "?" in text:
+        return "NOTIFY"
+    # "Ready for" near the end = user needs to act
+    tail = text[-100:]
+    if "Ready for" in tail or "ready for" in tail:
+        return "NOTIFY"
+    # Starts with completion word and no question = informational
+    for prefix in COMPLETION_PREFIXES:
+        if text.startswith(prefix):
+            return "SILENT"
+    # Ambiguous — fall through to Claude
+    return None
+
+
+# ============================================================================
+# DEBOUNCE
+# ============================================================================
+
+DEBOUNCE_FILE = os.path.expanduser("~/.claude/hooks/.stop-hook-debounce")
+DEBOUNCE_SECONDS = 3
+
+
+def _should_debounce(project: str) -> bool:
+    """Return True if this project was classified within DEBOUNCE_SECONDS."""
+    try:
+        with open(DEBOUNCE_FILE, "r") as f:
+            line = f.read().strip()
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            return False
+        stored_project, ts_str = parts
+        if stored_project != project:
+            return False
+        last_ts = float(ts_str)
+        import time
+        return (time.time() - last_ts) < DEBOUNCE_SECONDS
+    except Exception:
+        return False
+
+
+def _update_debounce(project: str):
+    """Write current timestamp for this project."""
+    try:
+        import time
+        with open(DEBOUNCE_FILE, "w") as f:
+            f.write(f"{project}\t{time.time()}")
+    except Exception:
+        pass
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -184,6 +252,12 @@ def main():
     transcript_path = input_data.get("transcript_path", "")
     cwd = input_data.get("cwd", os.getcwd())
     project = os.path.basename(cwd) if cwd else "unknown"
+
+    # Debounce: skip if same project was classified recently
+    if _should_debounce(project):
+        log("SILENT", project, "(debounced)")
+        sys.exit(0)
+    _update_debounce(project)
 
     # Edge case: no transcript path
     if not transcript_path:
@@ -201,7 +275,16 @@ def main():
     if len(last_message) > 80:
         summary += "..."
 
-    # Classify
+    # Fast local classification (skip Claude for obvious cases)
+    local_decision = classify_local(last_message)
+    if local_decision:
+        log(local_decision, project, f'"{summary}" (local)')
+        if local_decision == "NOTIFY":
+            tty = get_tty()
+            notify_hud_session_idle(session_id, cwd, summary, transcript_path, tty)
+        sys.exit(0)
+
+    # Classify via Claude
     decision = classify_message(last_message)
     log(decision, project, f'"{summary}"')
 

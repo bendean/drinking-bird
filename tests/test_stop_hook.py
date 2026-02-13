@@ -71,6 +71,8 @@ def run_main(input_data, mock_classify="SILENT", mock_last_text=None):
         patch("sys.stdin", io.StringIO(json.dumps(input_data))),
         patch("sys.stdout", captured_stdout),
         patch.object(hook, "log"),
+        patch.object(hook, "_should_debounce", return_value=False),
+        patch.object(hook, "_update_debounce"),
     ]
 
     if mock_last_text is not None:
@@ -359,3 +361,159 @@ class TestMain:
         summary = mock_hud.call_args[0][2]  # 3rd positional arg
         assert len(summary) == 83  # 80 chars + "..."
         assert summary.endswith("...")
+
+
+# ============================================================================
+# Tests for classify_local()
+# ============================================================================
+
+
+class TestClassifyLocal:
+    """Fast local classification without Claude."""
+
+    def test_question_mark_notify(self):
+        assert hook.classify_local("Would you like me to proceed?") == "NOTIFY"
+
+    def test_ready_for_notify(self):
+        assert hook.classify_local("The build is complete. Ready for your review.") == "NOTIFY"
+
+    def test_ready_for_lowercase_notify(self):
+        assert hook.classify_local("All set. ready for testing now.") == "NOTIFY"
+
+    def test_done_silent(self):
+        assert hook.classify_local("Done. All files updated.") == "SILENT"
+
+    def test_committed_silent(self):
+        assert hook.classify_local("Committed the changes to main.") == "SILENT"
+
+    def test_all_tests_pass_silent(self):
+        assert hook.classify_local("All tests pass with the new changes.") == "SILENT"
+
+    def test_ambiguous_returns_none(self):
+        assert hook.classify_local("I've made some changes to the codebase.") is None
+
+    def test_done_with_question_notify(self):
+        """Question mark should win over completion prefix."""
+        assert hook.classify_local("Done. Should I also update the docs?") == "NOTIFY"
+
+    def test_empty_returns_none(self):
+        assert hook.classify_local("") is None
+
+    def test_whitespace_only_returns_none(self):
+        assert hook.classify_local("   ") is None
+
+    def test_none_input_returns_none(self):
+        assert hook.classify_local(None) is None
+
+
+# ============================================================================
+# Tests for debounce
+# ============================================================================
+
+
+class TestDebounce:
+    """Debounce file logic."""
+
+    def test_no_file_returns_false(self):
+        with patch.object(hook, "DEBOUNCE_FILE", "/tmp/nonexistent-debounce-test"):
+            assert hook._should_debounce("myproject") is False
+
+    def test_same_project_recent_returns_true(self, tmp_path):
+        import time
+        debounce_file = str(tmp_path / "debounce")
+        with open(debounce_file, "w") as f:
+            f.write(f"myproject\t{time.time()}")
+        with patch.object(hook, "DEBOUNCE_FILE", debounce_file):
+            assert hook._should_debounce("myproject") is True
+
+    def test_same_project_expired_returns_false(self, tmp_path):
+        import time
+        debounce_file = str(tmp_path / "debounce")
+        with open(debounce_file, "w") as f:
+            f.write(f"myproject\t{time.time() - 10}")
+        with patch.object(hook, "DEBOUNCE_FILE", debounce_file):
+            assert hook._should_debounce("myproject") is False
+
+    def test_different_project_returns_false(self, tmp_path):
+        import time
+        debounce_file = str(tmp_path / "debounce")
+        with open(debounce_file, "w") as f:
+            f.write(f"otherproject\t{time.time()}")
+        with patch.object(hook, "DEBOUNCE_FILE", debounce_file):
+            assert hook._should_debounce("myproject") is False
+
+    def test_corrupted_file_returns_false(self, tmp_path):
+        debounce_file = str(tmp_path / "debounce")
+        with open(debounce_file, "w") as f:
+            f.write("garbage data no tab")
+        with patch.object(hook, "DEBOUNCE_FILE", debounce_file):
+            assert hook._should_debounce("myproject") is False
+
+    def test_update_writes_correct_format(self, tmp_path):
+        import time
+        debounce_file = str(tmp_path / "debounce")
+        with patch.object(hook, "DEBOUNCE_FILE", debounce_file):
+            hook._update_debounce("myproject")
+        with open(debounce_file, "r") as f:
+            content = f.read()
+        parts = content.split("\t")
+        assert parts[0] == "myproject"
+        assert abs(float(parts[1]) - time.time()) < 2
+
+
+# ============================================================================
+# Integration: local classify and debounce in main()
+# ============================================================================
+
+
+class TestMainLocalClassify:
+    """Local classification should skip Claude call."""
+
+    def test_question_skips_claude(self):
+        input_data = {
+            "session_id": "s",
+            "cwd": "/tmp",
+            "transcript_path": "/tmp/t.jsonl",
+        }
+        with patch.object(hook, "classify_message") as mock_classify, \
+             patch.object(hook, "notify_hud_session_idle"), \
+             patch.object(hook, "get_tty", return_value=None), \
+             patch.object(hook, "_should_debounce", return_value=False), \
+             patch.object(hook, "_update_debounce"):
+            run_main(input_data, mock_classify=None,
+                     mock_last_text="Would you like to proceed?")
+        mock_classify.assert_not_called()
+
+    def test_done_skips_claude(self):
+        input_data = {
+            "session_id": "s",
+            "cwd": "/tmp",
+            "transcript_path": "/tmp/t.jsonl",
+        }
+        with patch.object(hook, "classify_message") as mock_classify, \
+             patch.object(hook, "notify_hud_session_idle") as mock_hud, \
+             patch.object(hook, "_should_debounce", return_value=False), \
+             patch.object(hook, "_update_debounce"):
+            run_main(input_data, mock_classify=None,
+                     mock_last_text="Done. All changes applied.")
+        mock_classify.assert_not_called()
+        mock_hud.assert_not_called()
+
+
+class TestMainDebounce:
+    """Debounce should skip all classification."""
+
+    def test_debounced_skips_everything(self):
+        input_data = {
+            "session_id": "s",
+            "cwd": "/tmp",
+            "transcript_path": "/tmp/t.jsonl",
+        }
+        with patch.object(hook, "_should_debounce", return_value=True), \
+             patch.object(hook, "classify_message") as mock_classify, \
+             patch.object(hook, "get_last_assistant_text") as mock_text, \
+             patch.object(hook, "notify_hud_session_idle") as mock_hud:
+            exit_code, _ = run_main(input_data, mock_classify=None, mock_last_text=None)
+        mock_classify.assert_not_called()
+        mock_hud.assert_not_called()
+        assert exit_code == 0
