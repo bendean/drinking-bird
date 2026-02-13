@@ -405,6 +405,35 @@ class TestClassifyLocal:
     def test_none_input_returns_none(self):
         assert hook.classify_local(None) is None
 
+    # Idle/standing-by patterns → SILENT
+    def test_standing_by_silent(self):
+        assert hook.classify_local("Standing by.") == "SILENT"
+
+    def test_standing_by_with_context_silent(self):
+        assert hook.classify_local("Standing by for your decision.") == "SILENT"
+
+    def test_ready_when_you_are_silent(self):
+        assert hook.classify_local("Ready when you are.") == "SILENT"
+
+    def test_your_call_silent(self):
+        assert hook.classify_local("Your call.") == "SILENT"
+
+    def test_all_clear_silent(self):
+        assert hook.classify_local("All clear. Let me know when you'd like to move forward.") == "SILENT"
+
+    def test_waiting_on_your_silent(self):
+        assert hook.classify_local("Waiting on your input.") == "SILENT"
+
+    def test_idle_with_question_still_notify(self):
+        """Question mark wins over idle pattern."""
+        assert hook.classify_local("Standing by. Want me to continue?") == "NOTIFY"
+
+    def test_over_to_you_silent(self):
+        assert hook.classify_local("Over to you.") == "SILENT"
+
+    def test_no_action_needed_silent(self):
+        assert hook.classify_local("No action needed on my end.") == "SILENT"
+
 
 # ============================================================================
 # Tests for debounce

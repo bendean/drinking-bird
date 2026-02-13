@@ -179,6 +179,23 @@ COMPLETION_PREFIXES = [
     "All tests pass", "All done",
 ]
 
+# "Ball is in your court" messages — Claude is idle, user was already notified.
+# These fire repeatedly when background tasks complete and cause notification loops.
+IDLE_PATTERNS = [
+    "Standing by",
+    "Ready when you are",
+    "Your call",
+    "All clear",
+    "Whenever you're ready",
+    "Waiting on your",
+    "Waiting for your",
+    "Over to you",
+    "Up to you",
+    "No rush",
+    "Take your time",
+    "No action needed",
+]
+
 
 def classify_local(last_message: str):
     """Fast local classification. Returns 'NOTIFY', 'SILENT', or None (fall through to Claude)."""
@@ -192,6 +209,10 @@ def classify_local(last_message: str):
     tail = text[-100:]
     if "Ready for" in tail or "ready for" in tail:
         return "NOTIFY"
+    # Idle/standing-by patterns — Claude is waiting, no new notification needed
+    for pattern in IDLE_PATTERNS:
+        if text.startswith(pattern):
+            return "SILENT"
     # Starts with completion word and no question = informational
     for prefix in COMPLETION_PREFIXES:
         if text.startswith(prefix):
