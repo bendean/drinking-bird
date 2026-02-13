@@ -424,9 +424,13 @@ class TestClassifyLocal:
     def test_waiting_on_your_silent(self):
         assert hook.classify_local("Waiting on your input.") == "SILENT"
 
-    def test_idle_with_question_still_notify(self):
-        """Question mark wins over idle pattern."""
-        assert hook.classify_local("Standing by. Want me to continue?") == "NOTIFY"
+    def test_idle_with_question_still_silent(self):
+        """Idle pattern wins over question mark — user was already notified."""
+        assert hook.classify_local("Standing by. Want me to continue?") == "SILENT"
+
+    def test_waiting_for_your_with_question_silent(self):
+        """Idle 'Waiting for your' suppresses even when trailing '?' present."""
+        assert hook.classify_local("Waiting for your call — subagent-driven (this session) or parallel session?") == "SILENT"
 
     def test_over_to_you_silent(self):
         assert hook.classify_local("Over to you.") == "SILENT"

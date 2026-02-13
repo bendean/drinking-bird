@@ -202,6 +202,11 @@ def classify_local(last_message: str):
     if not last_message or not last_message.strip():
         return None
     text = last_message.strip()
+    # Idle/standing-by patterns — Claude is waiting, user was already notified.
+    # Check BEFORE "?" so "Waiting for your call — X or Y?" is still SILENT.
+    for pattern in IDLE_PATTERNS:
+        if text.startswith(pattern):
+            return "SILENT"
     # Question mark anywhere = user needs to respond
     if "?" in text:
         return "NOTIFY"
@@ -209,10 +214,6 @@ def classify_local(last_message: str):
     tail = text[-100:]
     if "Ready for" in tail or "ready for" in tail:
         return "NOTIFY"
-    # Idle/standing-by patterns — Claude is waiting, no new notification needed
-    for pattern in IDLE_PATTERNS:
-        if text.startswith(pattern):
-            return "SILENT"
     # Starts with completion word and no question = informational
     for prefix in COMPLETION_PREFIXES:
         if text.startswith(prefix):
