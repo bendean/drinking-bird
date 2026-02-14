@@ -376,11 +376,19 @@ SHELL_META_CHARS = ["|", ";", "&&", "||", "`", "$(", ">", "<"]
 def is_safe_bash(command: str) -> bool:
     """Check if a bash command matches safe patterns."""
     cmd = command.strip()
+    # Strip safe stderr redirections before meta-char check.
+    # 2>&1 and 2>/dev/null don't change command safety.
+    cmd_for_meta = re.sub(r"\s*2>&1\s*$", "", cmd)
+    cmd_for_meta = re.sub(r"\s*2>/dev/null\s*$", "", cmd_for_meta)
     # Compound/piped/redirected commands are never auto-approved.
-    if any(meta in cmd for meta in SHELL_META_CHARS):
+    if any(meta in cmd_for_meta for meta in SHELL_META_CHARS):
         return False
-    # Generic --version / -version is always safe
+    # Use the cleaned command for all further checks
+    cmd = cmd_for_meta.strip()
+    # Generic --version / -version / --help is always safe (read-only introspection)
     if cmd.endswith(" --version") or cmd.endswith(" -version") or cmd == "--version":
+        return True
+    if cmd.endswith(" --help") or cmd.endswith(" -help") or cmd == "--help":
         return True
     if cmd in SAFE_BASH_EXACT:
         return True
