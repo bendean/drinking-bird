@@ -68,6 +68,17 @@ class TestPermissionRegressions:
         assert not permission_hook.is_safe_bash("pip3 install pytest")
         assert not permission_hook.is_safe_bash("pip install requests")
 
+    def test_2026_02_14_env_example_not_sensitive(self):
+        '''`.env.example` was blocked by substring match on `.env.`.
+        Example files are templates — they never contain real secrets.'''
+        assert not permission_hook.is_sensitive_file("/Users/ben/AI-Lab/mlb-project/config/.env.example")
+        assert not permission_hook.is_sensitive_file("/project/.env.sample")
+        assert not permission_hook.is_sensitive_file("/project/.env.template")
+        # Real .env files should still be blocked
+        assert permission_hook.is_sensitive_file("/project/.env")
+        assert permission_hook.is_sensitive_file("/project/.env.local")
+        assert permission_hook.is_sensitive_file("/project/.env.production")
+
 
 # ============================================================================
 # Stop hook regressions
@@ -87,3 +98,54 @@ class TestStopHookRegressions:
         because "?" check ran before idle pattern check.'''
         result = stop_hook.classify_local("Waiting for your call — should we do X or Y?")
         assert result == "SILENT"
+
+    def test_2026_02_14_imperative_instruction_notify(self):
+        '''"Now run tests:" is an instruction to the user — should NOTIFY.
+        Was falling through to Claude which incorrectly said SILENT.'''
+        result = stop_hook.classify_local("Now run tests:")
+        assert result == "NOTIFY"
+        # Other imperative instructions
+        result2 = stop_hook.classify_local("Please restart the server and check the logs.")
+        assert result2 == "NOTIFY"
+        result3 = stop_hook.classify_local("Run the build and let me know if it passes.")
+        assert result3 == "NOTIFY"
+
+
+# ============================================================================
+# Credential redaction regressions
+# ============================================================================
+
+class TestCredentialRedaction:
+    """Regressions from credential leak in log reason field."""
+
+    def test_2026_02_14_reason_field_redacts_credentials(self):
+        '''Credentials in the reason field were written to the log unredacted.
+        The summary field was redacted via _summarize_input(), but the reason
+        string (e.g. "Always-ask pattern: export TOKEN=abc123") was not.'''
+        redacted = permission_hook._redact_credentials(
+            "Always-ask pattern: export TRELLO_API_KEY=1a9699a4f7595d0322919915103a4a2e && export TRELLO_TOKEN=2da5e7e61cde"
+        )
+        assert "1a9699a4f7595d0322919915103a4a2e" not in redacted
+        assert "2da5e7e61cde" not in redacted
+        assert "TRELLO_API_KEY=***" in redacted
+        assert "TRELLO_TOKEN=***" in redacted
+
+    def test_2026_02_14_log_function_redacts_reason(self, tmp_path):
+        '''The log() function itself must redact credentials in the reason field,
+        not just rely on callers to redact.'''
+        import tempfile
+        log_file = tmp_path / "test.log"
+        # Temporarily override LOG_FILE
+        original = permission_hook.LOG_FILE
+        permission_hook.LOG_FILE = str(log_file)
+        try:
+            permission_hook.log(
+                "PASSTHROUGH", "Bash",
+                "Always-ask pattern: export SECRET=hunter2",
+                {"command": "export SECRET=hunter2"}
+            )
+            content = log_file.read_text()
+            assert "hunter2" not in content
+            assert "SECRET=***" in content
+        finally:
+            permission_hook.LOG_FILE = original

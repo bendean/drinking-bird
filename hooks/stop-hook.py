@@ -214,6 +214,11 @@ def classify_local(last_message: str):
     tail = text[-100:]
     if "Ready for" in tail or "ready for" in tail:
         return "NOTIFY"
+    # Imperative instruction: "Now run X", "Please restart", "Run the build"
+    # These tell the user to do something — they need to act.
+    import re
+    if re.match(r"^(Now |Please |Run |Try |Check |Test |Start |Stop |Open |Go )", text):
+        return "NOTIFY"
     # Starts with completion word and no question = informational
     for prefix in COMPLETION_PREFIXES:
         if text.startswith(prefix):
@@ -289,8 +294,7 @@ def main():
     # Read last assistant message
     last_message = get_last_assistant_text(transcript_path)
     if not last_message:
-        log("SILENT", project, "(empty transcript or no text)")
-        sys.exit(0)
+        sys.exit(0)  # Tool-only turns — don't log, just exit
 
     # Truncate for logging/summary
     summary = last_message[:80].replace("\n", " ")

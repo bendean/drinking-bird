@@ -39,6 +39,7 @@ def log(decision: str, tool_name: str, reason: str, tool_input: dict = None):
     try:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         summary = _summarize_input(tool_name, tool_input or {})
+        reason = _redact_credentials(reason)
         line = f"[{ts}] {decision:>10}  {tool_name:<20}  {summary}  ({reason})\n"
         with open(LOG_FILE, "a") as f:
             f.write(line)
@@ -231,12 +232,14 @@ DANGEROUS_BASH_PATTERNS = [
 # Substring patterns — match anywhere in the path
 SENSITIVE_PATH_PATTERNS = [
     ".env",
-    ".env.",
     "secrets/",
     ".aws/credentials",
     ".ssh/id_",
     ".gnupg/",
 ]
+
+# .env files that are NOT sensitive (templates, examples)
+ENV_SAFE_SUFFIXES = (".example", ".sample", ".template")
 
 # Basename patterns — match against filename only (exact name or name without extension)
 SENSITIVE_BASENAME_PATTERNS = [
@@ -423,7 +426,11 @@ def is_sensitive_file(path: str) -> bool:
     path_lower = path.lower()
     # Substring patterns (path components like .env, secrets/)
     if any(pattern in path_lower for pattern in SENSITIVE_PATH_PATTERNS):
-        return True
+        # Exclude known-safe .env templates (.env.example, .env.sample, .env.template)
+        if path_lower.endswith(ENV_SAFE_SUFFIXES):
+            pass  # Not sensitive — fall through to other checks
+        else:
+            return True
     # Basename patterns — check filename without extension
     basename = os.path.basename(path_lower)
     name_no_ext = os.path.splitext(basename)[0]
