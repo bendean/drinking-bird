@@ -92,6 +92,9 @@ ALWAYS_ASK_BASH_PATTERNS = [
     "git commit",
     "git push",
     "git merge",
+    "git branch -d ",
+    "git branch -D ",
+    "git branch --delete",
     "osascript",
     "pkill ",
     "kill ",
@@ -116,7 +119,11 @@ SAFE_BASH_PREFIXES = [
     "git log",
     "git diff",
     "git status",
-    "git branch",
+    "git branch -a",
+    "git branch -v",
+    "git branch -r",
+    "git branch --list",
+    "git branch --show-current",
     "git show",
     "git stash list",
     "git remote -v",
@@ -195,6 +202,9 @@ SAFE_BASH_EXACT = {
     "uname",
     "git status",
     "git branch",
+    "git branch -a",
+    "git branch -v",
+    "git branch -r",
     "npm test",
     "pytest",
     "sw_vers",
@@ -373,7 +383,7 @@ def notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty=None
 
 # Shell meta-characters that indicate chaining, piping, or redirection.
 # Commands containing these are never auto-approved — they fall through to Tier 3.
-SHELL_META_CHARS = ["|", ";", "&&", "||", "`", "$(", ">", "<"]
+SHELL_META_CHARS = ["|", ";", "&&", "||", "`", "$(", ">", "<", "&"]
 
 
 def is_safe_bash(command: str) -> bool:
