@@ -214,10 +214,12 @@ def classify_local(last_message: str):
     tail = text[-100:]
     if "Ready for" in tail or "ready for" in tail:
         return "NOTIFY"
-    # Imperative instruction: "Now run X", "Please restart", "Run the build"
+    # Imperative instruction: "Run the build", "Please restart", "Now run tests"
     # These tell the user to do something — they need to act.
+    # "Now " is narrowed to "Now <verb>" to avoid false positives when Claude
+    # narrates its own actions ("Now let me verify...", "Now add the gap...").
     import re
-    if re.match(r"^(Now |Please |Run |Try |Check |Test |Start |Stop |Open |Go )", text):
+    if re.match(r"^(Please |Run |Try |Check |Test |Start |Stop |Open |Go |Now (?:run |try |check |test |start |stop |open |go ))", text, re.IGNORECASE):
         return "NOTIFY"
     # Starts with completion word and no question = informational
     for prefix in COMPLETION_PREFIXES:

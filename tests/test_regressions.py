@@ -98,6 +98,76 @@ class TestPermissionRegressions:
         assert permission_hook.is_safe_bash("git status 2>&1")
         assert permission_hook.is_safe_bash("python3 --version 2>&1")
 
+    def test_2026_02_19_mkdir_safe(self):
+        '''`mkdir -p /project/dir` was going to Tier 3 (2-5s Claude evaluation).
+        mkdir is non-destructive — it creates directories and fails silently
+        if they already exist. Should be Tier 1 safe.'''
+        assert permission_hook.is_safe_bash("mkdir -p /Users/ben/AI-Lab/mlb-project/backend/simulator")
+        assert permission_hook.is_safe_bash("mkdir -p /Users/ben/AI-Lab/mlb-project/data/social")
+        assert permission_hook.is_safe_bash("mkdir /tmp/test")
+        assert permission_hook.is_safe_bash("mkdir -p src/components tests/fixtures")
+
+    def test_2026_02_19_venv_pytest_safe(self):
+        '''`.venv/bin/python -m pytest tests/ -q` was going to Tier 3 because
+        the safe prefix `python3 -m pytest` doesn't match venv python paths.
+        Running tests via venv is identical to running them via system python.'''
+        assert permission_hook.is_safe_bash(".venv/bin/python -m pytest tests/ -q")
+        assert permission_hook.is_safe_bash(".venv/bin/python -m pytest tests/ -v")
+        assert permission_hook.is_safe_bash(".venv/bin/python3 -m pytest tests/")
+        assert permission_hook.is_safe_bash(".venv/bin/python -m pytest tests/test_parser.py -v")
+        # System python should still be safe
+        assert permission_hook.is_safe_bash("python3 -m pytest tests/")
+        assert permission_hook.is_safe_bash("python -m pytest tests/")
+
+    def test_2026_02_19_cp_safe(self):
+        '''`cp src dest` was going to Tier 3. cp is non-destructive — it copies
+        files without removing the source. Standard dev operation.'''
+        assert permission_hook.is_safe_bash("cp /Users/ben/AI-Lab/mlb-project/docs/artifacts/feed-v3.md /Users/ben/AI-Lab/mlb-project/docs/artifacts/feed-v4.md")
+        assert permission_hook.is_safe_bash("cp -r src/ backup/")
+        assert permission_hook.is_safe_bash("cp file.txt file.bak")
+
+    def test_2026_02_19_aws_read_only_safe(self):
+        '''AWS CLI read-only commands (describe, list, get, head) were going to
+        Tier 3 (~2-5s Claude evaluation). These are safe — they require AWS
+        credentials to be configured and only read data.'''
+        # describe- commands
+        assert permission_hook.is_safe_bash("aws ec2 describe-instances")
+        assert permission_hook.is_safe_bash("aws ec2 describe-instances --region us-east-1")
+        assert permission_hook.is_safe_bash("aws rds describe-db-instances")
+        assert permission_hook.is_safe_bash("aws ecs describe-clusters --clusters my-cluster")
+        # list- commands
+        assert permission_hook.is_safe_bash("aws s3api list-buckets")
+        assert permission_hook.is_safe_bash("aws iam list-users")
+        assert permission_hook.is_safe_bash("aws lambda list-functions --region us-west-2")
+        # get- commands
+        assert permission_hook.is_safe_bash("aws sts get-caller-identity")
+        assert permission_hook.is_safe_bash("aws ssm get-parameter --name /my/param")
+        assert permission_hook.is_safe_bash("aws s3api get-object --bucket b --key k out.txt")
+        # head- commands
+        assert permission_hook.is_safe_bash("aws s3api head-object --bucket b --key k")
+        # s3 ls
+        assert permission_hook.is_safe_bash("aws s3 ls")
+        assert permission_hook.is_safe_bash("aws s3 ls s3://my-bucket/path/")
+        # help
+        assert permission_hook.is_safe_bash("aws help")
+        assert permission_hook.is_safe_bash("aws ec2 help")
+        # wait (polls, doesn't modify)
+        assert permission_hook.is_safe_bash("aws ec2 wait instance-running --instance-ids i-1234")
+
+    def test_2026_02_19_aws_write_not_safe(self):
+        '''AWS CLI write/mutating commands must NOT be auto-approved.
+        They should go to Tier 3 for Claude evaluation.'''
+        assert not permission_hook.is_safe_bash("aws ec2 terminate-instances --instance-ids i-1234")
+        assert not permission_hook.is_safe_bash("aws s3 rm s3://my-bucket/file.txt")
+        assert not permission_hook.is_safe_bash("aws s3 cp file.txt s3://my-bucket/")
+        assert not permission_hook.is_safe_bash("aws s3 sync . s3://my-bucket/")
+        assert not permission_hook.is_safe_bash("aws ec2 run-instances --image-id ami-1234")
+        assert not permission_hook.is_safe_bash("aws iam create-user --user-name bob")
+        assert not permission_hook.is_safe_bash("aws iam delete-user --user-name bob")
+        assert not permission_hook.is_safe_bash("aws lambda invoke --function-name f out.json")
+        assert not permission_hook.is_safe_bash("aws ec2 stop-instances --instance-ids i-1234")
+        assert not permission_hook.is_safe_bash("aws rds delete-db-instance --db-instance-identifier mydb")
+
     def test_2026_02_14_env_example_not_sensitive(self):
         '''`.env.example` was blocked by substring match on `.env.`.
         Example files are templates — they never contain real secrets.'''
@@ -139,6 +209,23 @@ class TestStopHookRegressions:
         assert result2 == "NOTIFY"
         result3 = stop_hook.classify_local("Run the build and let me know if it passes.")
         assert result3 == "NOTIFY"
+
+    def test_2026_02_18_now_prefix_false_positive(self):
+        '''"Now let me verify systematically" and "Now add the gap between the two rows:"
+        were NOTIFY because "Now " prefix matched too broadly. These are Claude
+        narrating its own next actions, not instructing the user to act.
+        "Now " should only NOTIFY when followed by a user-directed imperative
+        like "Now run/try/check/test".'''
+        # Claude narrating its own actions — should NOT be NOTIFY
+        assert stop_hook.classify_local("Now let me verify systematically. I'll check every mapping and also scan") != "NOTIFY"
+        assert stop_hook.classify_local("Now rewrite the RosterPreview component with inline flow layout") != "NOTIFY"
+        assert stop_hook.classify_local("Now add the same background to the team name cells and add gaps") != "NOTIFY"
+        assert stop_hook.classify_local("Now add the gap between the two rows:") != "NOTIFY"
+        assert stop_hook.classify_local("Now it's one container with borderTop + borderBottom as the white lines") != "NOTIFY"
+        # User-directed imperatives — should still NOTIFY
+        assert stop_hook.classify_local("Now run tests:") == "NOTIFY"
+        assert stop_hook.classify_local("Now try opening the app and check if the layout looks correct.") == "NOTIFY"
+        assert stop_hook.classify_local("Now check the console for errors.") == "NOTIFY"
 
 
 # ============================================================================

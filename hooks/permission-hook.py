@@ -114,6 +114,8 @@ SAFE_BASH_PREFIXES = [
     "node --version",
     "python3 -m pytest",
     "python -m pytest",
+    ".venv/bin/python -m pytest",
+    ".venv/bin/python3 -m pytest",
     "pip list",
     "pip show",
     "git log",
@@ -128,6 +130,8 @@ SAFE_BASH_PREFIXES = [
     "git stash list",
     "git remote -v",
     "git tag",
+    "mkdir ",
+    "cp ",
     "cat ",
     "head ",
     "tail ",
@@ -386,6 +390,49 @@ def notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty=None
 SHELL_META_CHARS = ["|", ";", "&&", "||", "`", "$(", ">", "<", "&"]
 
 
+# AWS CLI read-only operation prefixes (e.g., describe-instances, list-buckets, get-object)
+AWS_READ_ONLY_VERBS = ("describe-", "list-", "get-", "head-", "batch-get-")
+
+# AWS CLI read-only exact operations (don't follow the verb-noun pattern)
+AWS_READ_ONLY_EXACT = {"help", "ls", "wait"}
+
+
+def is_safe_aws(command: str) -> bool:
+    """Check if an AWS CLI command is read-only.
+
+    Parses `aws [flags] <service> <operation>` and checks if the operation
+    is a known read-only verb. Conservative — if flag values confuse the
+    parser, returns False (falls through to Tier 3, not auto-approved).
+    """
+    tokens = command.split()
+    if len(tokens) < 2:
+        return False
+
+    # Extract non-flag tokens after 'aws' — best-effort service + operation
+    non_flag = [t for t in tokens[1:] if not t.startswith("-")]
+    if not non_flag:
+        return False
+
+    # 'aws help' or 'aws <service> help'
+    if non_flag[0] == "help" or (len(non_flag) > 1 and non_flag[1] == "help"):
+        return True
+
+    if len(non_flag) < 2:
+        return False
+
+    operation = non_flag[1]
+
+    # Read-only verb prefixes
+    if operation.startswith(AWS_READ_ONLY_VERBS):
+        return True
+
+    # Exact read-only operations (e.g., 'aws s3 ls', 'aws ec2 wait')
+    if operation in AWS_READ_ONLY_EXACT:
+        return True
+
+    return False
+
+
 def is_safe_bash(command: str) -> bool:
     """Check if a bash command matches safe patterns."""
     cmd = command.strip()
@@ -405,7 +452,12 @@ def is_safe_bash(command: str) -> bool:
         return True
     if cmd in SAFE_BASH_EXACT:
         return True
-    return any(cmd.startswith(prefix) for prefix in SAFE_BASH_PREFIXES)
+    if any(cmd.startswith(prefix) for prefix in SAFE_BASH_PREFIXES):
+        return True
+    # AWS CLI read-only commands
+    if cmd.startswith("aws ") and is_safe_aws(cmd):
+        return True
+    return False
 
 
 def is_dangerous_bash(command: str) -> bool:
