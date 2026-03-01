@@ -179,6 +179,202 @@ class TestPermissionRegressions:
         assert permission_hook.is_sensitive_file("/project/.env.local")
         assert permission_hook.is_sensitive_file("/project/.env.production")
 
+    def test_2026_02_20_git_dash_C_safe(self):
+        '''`git -C /path/to/repo log`, `git -C /path status`, etc. went to Tier 3
+        because -C <path> between `git` and the subcommand prevented prefix matching.
+        These are the same read-only git operations — the -C flag just changes the
+        repo directory. Should be Tier 1 safe.'''
+        # Read-only git commands with -C should be safe
+        assert permission_hook.is_safe_bash("git -C /Users/ben/AI-Lab/custom-tools/ai-lab-kanban log --oneline -20")
+        assert permission_hook.is_safe_bash("git -C /Users/ben/AI-Lab/custom-tools/ai-lab-kanban status")
+        assert permission_hook.is_safe_bash("git -C /Users/ben/AI-Lab/custom-tools/ai-lab-kanban diff --stat")
+        assert permission_hook.is_safe_bash("git -C /Users/ben/AI-Lab/custom-tools/ai-lab-kanban diff TODO.md")
+        assert permission_hook.is_safe_bash("git -C /Users/ben/AI-Lab/custom-tools/ai-lab-kanban show --stat 098583b")
+        assert permission_hook.is_safe_bash("git -C /some/path branch -a")
+        assert permission_hook.is_safe_bash("git -C /some/path branch -v")
+        assert permission_hook.is_safe_bash("git -C /some/path tag")
+        assert permission_hook.is_safe_bash("git -C /some/path remote -v")
+        assert permission_hook.is_safe_bash("git -C /some/path stash list")
+        # Dangerous git commands with -C should NOT be safe (should still hit always-ask or Tier 3)
+        assert not permission_hook.is_safe_bash("git -C /some/path push")
+        assert not permission_hook.is_safe_bash("git -C /some/path reset --hard HEAD")
+
+    def test_2026_02_20_git_add_safe(self):
+        '''`git add server.py static/app.js ...` went to Tier 3. Staging files is
+        safe — it doesn't modify history, doesn't touch the network, and is
+        trivially reversible with `git reset`. Should be Tier 1 safe.'''
+        assert permission_hook.is_safe_bash("git add server.py static/app.js static/style.css tests/test_file_matching.py TODO.md")
+        assert permission_hook.is_safe_bash("git add .")
+        assert permission_hook.is_safe_bash("git add -A")
+        assert permission_hook.is_safe_bash("git add --all")
+        assert permission_hook.is_safe_bash("git add -u")
+        assert permission_hook.is_safe_bash("git add src/components/Button.tsx")
+
+    def test_2026_02_21_gh_read_only_safe(self):
+        '''`gh auth status 2>&1` went to Tier 3 (Claude evaluation). GitHub CLI
+        read-only commands like auth status, pr list, pr view, repo list, repo view
+        are safe — they only read data and don't modify anything.'''
+        # auth status
+        assert permission_hook.is_safe_bash("gh auth status")
+        assert permission_hook.is_safe_bash("gh auth status 2>&1")
+        # pr read-only
+        assert permission_hook.is_safe_bash("gh pr list")
+        assert permission_hook.is_safe_bash("gh pr list --state open")
+        assert permission_hook.is_safe_bash("gh pr view 123")
+        assert permission_hook.is_safe_bash("gh pr view --web")
+        assert permission_hook.is_safe_bash("gh pr status")
+        assert permission_hook.is_safe_bash("gh pr checks 42")
+        assert permission_hook.is_safe_bash("gh pr diff 42")
+        # repo read-only
+        assert permission_hook.is_safe_bash("gh repo list")
+        assert permission_hook.is_safe_bash("gh repo list myorg")
+        assert permission_hook.is_safe_bash("gh repo view")
+        assert permission_hook.is_safe_bash("gh repo view owner/repo")
+        # issue read-only
+        assert permission_hook.is_safe_bash("gh issue list")
+        assert permission_hook.is_safe_bash("gh issue view 42")
+        assert permission_hook.is_safe_bash("gh issue status")
+        # release read-only
+        assert permission_hook.is_safe_bash("gh release list")
+        assert permission_hook.is_safe_bash("gh release view v1.0")
+        # api (read-only GET requests)
+        assert permission_hook.is_safe_bash("gh api repos/owner/repo/pulls/123/comments")
+        # help/version
+        assert permission_hook.is_safe_bash("gh --version")
+        assert permission_hook.is_safe_bash("gh help")
+
+    def test_2026_02_21_gh_write_not_safe(self):
+        '''GitHub CLI mutating commands must NOT be auto-approved.
+        They should go to Tier 3 for Claude evaluation.'''
+        assert not permission_hook.is_safe_bash("gh pr create --title 'fix' --body 'done'")
+        assert not permission_hook.is_safe_bash("gh pr merge 42")
+        assert not permission_hook.is_safe_bash("gh pr close 42")
+        assert not permission_hook.is_safe_bash("gh repo create my-repo --private")
+        assert not permission_hook.is_safe_bash("gh repo delete owner/repo")
+        assert not permission_hook.is_safe_bash("gh repo edit --visibility public")
+        assert not permission_hook.is_safe_bash("gh repo clone owner/repo")
+        assert not permission_hook.is_safe_bash("gh issue create --title 'bug'")
+        assert not permission_hook.is_safe_bash("gh issue close 42")
+        assert not permission_hook.is_safe_bash("gh release create v1.0")
+        assert not permission_hook.is_safe_bash("gh release delete v1.0")
+
+    def test_2026_02_21_git_init_safe(self):
+        '''`git init` went to Tier 3 (Claude evaluation). git init creates a new
+        .git directory — non-destructive, standard dev operation similar to mkdir.
+        Should be Tier 1 safe.'''
+        assert permission_hook.is_safe_bash("git init")
+        assert permission_hook.is_safe_bash("git init .")
+        assert permission_hook.is_safe_bash("git init /path/to/project")
+
+    def test_2026_02_22_ln_symlink_safe(self):
+        '''`ln -sf source target` went to Tier 3 (Claude evaluation). Symlink
+        creation is non-destructive — the source file is never modified. Even
+        with -f (force), only the symlink itself is overwritten. Common dev
+        operation for linking data files, configs, etc.'''
+        assert permission_hook.is_safe_bash("ln -sf /Users/ben/AI-Lab/mlb-project/backend/data/game_cache/831732.json /Users/ben/AI-Lab/mlb-project/.claude/worktrees/phase-a/data/")
+        assert permission_hook.is_safe_bash("ln -s source.txt link.txt")
+        assert permission_hook.is_safe_bash("ln -sf /path/to/target /path/to/link")
+        assert permission_hook.is_safe_bash("ln target link")
+
+    def test_2026_02_22_git_ls_files_safe(self):
+        '''`git ls-files` went to Tier 3 (Claude evaluation). git ls-files is
+        a read-only command that lists tracked files. No modification capability.'''
+        assert permission_hook.is_safe_bash("git ls-files")
+        assert permission_hook.is_safe_bash("git ls-files backend/data/game_cache/")
+        assert permission_hook.is_safe_bash("git ls-files --others --ignored --exclude-standard")
+
+    def test_2026_02_22_git_check_ignore_safe(self):
+        '''`git check-ignore -q .claude/worktrees` went to Tier 3 (Claude evaluation).
+        git check-ignore is a read-only command that queries .gitignore rules.'''
+        assert permission_hook.is_safe_bash("git check-ignore -q .claude/worktrees")
+        assert permission_hook.is_safe_bash("git check-ignore src/file.txt")
+        assert permission_hook.is_safe_bash("git check-ignore -v path/to/file")
+
+    def test_2026_02_22_git_worktree_list_safe(self):
+        '''`git worktree list` is read-only — just lists existing worktrees.
+        But `git worktree add/remove/prune` create or destroy state, so they
+        should NOT be auto-approved.'''
+        # List is read-only — safe
+        assert permission_hook.is_safe_bash("git worktree list")
+        assert permission_hook.is_safe_bash("git worktree list --porcelain")
+        # Add/remove/prune are NOT safe — they create/destroy state
+        assert not permission_hook.is_safe_bash("git worktree add .claude/worktrees/feature -b feature/x")
+        assert not permission_hook.is_safe_bash("git worktree remove .claude/worktrees/feature")
+        assert not permission_hook.is_safe_bash("git worktree prune")
+
+    def test_2026_02_23_git_rev_parse_safe(self):
+        '''`git -C /path rev-parse HEAD` went to Tier 3 (Claude evaluation).
+        git rev-parse is a read-only plumbing command — it prints commit SHAs,
+        branch names, and repo paths. Zero modification capability.
+        Should be Tier 1 safe.'''
+        assert permission_hook.is_safe_bash("git rev-parse HEAD")
+        assert permission_hook.is_safe_bash("git rev-parse --abbrev-ref HEAD")
+        assert permission_hook.is_safe_bash("git rev-parse --show-toplevel")
+        assert permission_hook.is_safe_bash("git rev-parse --git-dir")
+        assert permission_hook.is_safe_bash("git rev-parse --short HEAD")
+        # With -C flag (should normalize and still match)
+        assert permission_hook.is_safe_bash("git -C /Users/ben/AI-Lab rev-parse HEAD")
+
+    def test_2026_02_25_git_merge_base_not_always_ask(self):
+        '''`git merge-base` inside $(…) triggered ALWAYS_ASK "git merge" substring match.
+        `git merge-base` is a read-only plumbing command — it prints commit SHAs.
+        It should NOT be caught by the "git merge" always-ask pattern.
+        Commands like `git merge feature-branch` should still always-ask.'''
+        # git merge-base is read-only — should NOT match always-ask
+        # (These commands also have shell meta-chars, so they won't be Tier 1 safe.
+        #  The test verifies they don't hit ALWAYS_ASK, allowing them to reach Tier 3.)
+        cmd1 = "cd /Users/ben/project && git log branch --not $(git merge-base main branch)"
+        assert not any(p in cmd1 for p in permission_hook.ALWAYS_ASK_BASH_PATTERNS), \
+            "git merge-base should not trigger always-ask 'git merge' pattern"
+        cmd2 = "cd /Users/ben/project && git diff $(git merge-base main branch) branch --name-status"
+        assert not any(p in cmd2 for p in permission_hook.ALWAYS_ASK_BASH_PATTERNS), \
+            "git merge-base should not trigger always-ask 'git merge' pattern"
+        # Actual git merge commands should still match always-ask
+        assert any(p in "git merge feature-branch" for p in permission_hook.ALWAYS_ASK_BASH_PATTERNS)
+        assert any(p in "git merge --no-ff feature" for p in permission_hook.ALWAYS_ASK_BASH_PATTERNS)
+        assert any(p in "git merge main" for p in permission_hook.ALWAYS_ASK_BASH_PATTERNS)
+
+    def test_2026_02_26_venv_pytest_direct_safe(self):
+        '''`.venv/bin/pytest tests/ -v` went to Tier 3 (Claude evaluation).
+        We already have `.venv/bin/python -m pytest` and bare `pytest` as safe,
+        but the direct `.venv/bin/pytest` binary invocation was missing.
+        Running pytest from a venv is identical in safety to running it directly.'''
+        assert permission_hook.is_safe_bash(".venv/bin/pytest tests/ -v")
+        assert permission_hook.is_safe_bash(".venv/bin/pytest tests/ -q")
+        assert permission_hook.is_safe_bash(".venv/bin/pytest tests/test_hooks.py -v")
+        assert permission_hook.is_safe_bash(".venv/bin/pytest")
+        # Existing venv python -m pytest should still work
+        assert permission_hook.is_safe_bash(".venv/bin/python -m pytest tests/")
+        assert permission_hook.is_safe_bash(".venv/bin/python3 -m pytest tests/")
+
+    def test_2026_02_24_npx_dev_tools_safe(self):
+        '''`npx jest lib/github/parse-url.test.ts 2>&1` went to Tier 3 ~6 times.
+        `npx next build 2>&1` went to Tier 3 ~5 times. These are standard dev
+        tool invocations equivalent to `jest `, `npm run build`, `npm run dev`
+        which are already Tier 1 safe. npx runs locally-installed node packages
+        — same as running the command directly. Should be Tier 1 safe.'''
+        # npx jest (test runner — equivalent to `jest ` which is already safe)
+        assert permission_hook.is_safe_bash("npx jest lib/github/parse-url.test.ts 2>&1")
+        assert permission_hook.is_safe_bash("npx jest lib/github/api.test.ts 2>&1")
+        assert permission_hook.is_safe_bash("npx jest --verbose 2>&1")
+        assert permission_hook.is_safe_bash("npx jest")
+        # npx vitest (test runner — equivalent to `vitest ` which is already safe)
+        assert permission_hook.is_safe_bash("npx vitest run")
+        assert permission_hook.is_safe_bash("npx vitest --watch")
+        # npx next build/dev/lint (equivalent to npm run build/dev/lint)
+        assert permission_hook.is_safe_bash("npx next build 2>&1")
+        assert permission_hook.is_safe_bash("npx next dev -p 3001")
+        assert permission_hook.is_safe_bash("npx next lint 2>&1")
+        # npx tsc (TypeScript compiler — equivalent to `tsc ` which is already safe)
+        assert permission_hook.is_safe_bash("npx tsc --noEmit")
+        assert permission_hook.is_safe_bash("npx tsc --version")
+        # npx eslint/prettier (linters — equivalents already safe)
+        assert permission_hook.is_safe_bash("npx eslint src/")
+        assert permission_hook.is_safe_bash("npx prettier --check src/")
+        # npx with unknown packages should NOT be safe (falls to Tier 3)
+        assert not permission_hook.is_safe_bash("npx cowsay hello")
+        assert not permission_hook.is_safe_bash("npx create-react-app my-app")
+
 
 # ============================================================================
 # Stop hook regressions
@@ -226,6 +422,30 @@ class TestStopHookRegressions:
         assert stop_hook.classify_local("Now run tests:") == "NOTIFY"
         assert stop_hook.classify_local("Now try opening the app and check if the layout looks correct.") == "NOTIFY"
         assert stop_hook.classify_local("Now check the console for errors.") == "NOTIFY"
+
+    def test_2026_02_28_copied_opened_completion(self):
+        '''"Copied. 16 games with results..." and "Opened. Here's what you'll see:..."
+        went to Tier 3 Claude instead of being locally classified as SILENT.
+        "Copied" and "Opened" are completion actions like "Created", "Updated",
+        "Pushed" — they indicate a task was done. Should be SILENT (local).'''
+        # Completion actions — should be SILENT
+        assert stop_hook.classify_local("Copied. 16 games with results, reviews, and scorecards in run-20260228.") == "SILENT"
+        assert stop_hook.classify_local("Opened. Here's what you'll see: Chat area with day separators.") == "SILENT"
+        assert stop_hook.classify_local("Copied the files to the M1 successfully.") == "SILENT"
+        assert stop_hook.classify_local("Opened the viewer at localhost:5174.") == "SILENT"
+        # With question mark, should still NOTIFY (question check runs first)
+        assert stop_hook.classify_local("Copied. Should I also deploy?") == "NOTIFY"
+        assert stop_hook.classify_local("Opened the file. Does it look right?") == "NOTIFY"
+
+    def test_2026_02_28_refresh_imperative(self):
+        '''"Refresh /audit. The card detail meta strip now shows the game date..."
+        went to Tier 3 Claude instead of being locally classified as NOTIFY.
+        "Refresh" is an imperative telling the user to reload a page/view,
+        like "Run", "Check", "Open" which are already caught locally.'''
+        # Imperative — should be NOTIFY
+        assert stop_hook.classify_local("Refresh /audit. The card detail meta strip now shows the game date.") == "NOTIFY"
+        assert stop_hook.classify_local("Refresh the page to see the changes.") == "NOTIFY"
+        assert stop_hook.classify_local("Refresh your browser and check the layout.") == "NOTIFY"
 
 
 # ============================================================================

@@ -91,7 +91,7 @@ PASSTHROUGH_BASH_COMMANDS = {"drinking-bird-test"}
 ALWAYS_ASK_BASH_PATTERNS = [
     "git commit",
     "git push",
-    "git merge",
+    "git merge ",
     "git branch -d ",
     "git branch -D ",
     "git branch --delete",
@@ -116,11 +116,15 @@ SAFE_BASH_PREFIXES = [
     "python -m pytest",
     ".venv/bin/python -m pytest",
     ".venv/bin/python3 -m pytest",
+    ".venv/bin/pytest",
     "pip list",
     "pip show",
     "git log",
     "git diff",
     "git status",
+    "git init",
+    "git add ",
+    "git add .",
     "git branch -a",
     "git branch -v",
     "git branch -r",
@@ -172,6 +176,14 @@ SAFE_BASH_PREFIXES = [
     "tsc ",
     "eslint ",
     "prettier ",
+    "npx jest",
+    "npx vitest",
+    "npx next build",
+    "npx next dev",
+    "npx next lint",
+    "npx tsc",
+    "npx eslint",
+    "npx prettier",
     "black ",
     "ruff ",
     "mypy ",
@@ -190,9 +202,14 @@ SAFE_BASH_PREFIXES = [
     "lsof ",
     "id ",
     "strings ",
+    "ln ",
     "claude mcp list",
     "claude help",
     "claude skills",
+    "git ls-files",
+    "git check-ignore",
+    "git worktree list",
+    "git rev-parse",
 ]
 
 # Exact-match safe bash commands
@@ -205,6 +222,11 @@ SAFE_BASH_EXACT = {
     "printenv",
     "uname",
     "git status",
+    "git init",
+    "git add .",
+    "git add -A",
+    "git add --all",
+    "git add -u",
     "git branch",
     "git branch -a",
     "git branch -v",
@@ -390,6 +412,20 @@ def notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty=None
 SHELL_META_CHARS = ["|", ";", "&&", "||", "`", "$(", ">", "<", "&"]
 
 
+# GitHub CLI (gh) read-only subcommand operations
+# Format: gh <resource> <operation> — only these operations are safe per resource
+GH_READ_ONLY_OPS = {
+    "auth":    {"status", "token"},
+    "pr":      {"list", "view", "status", "checks", "diff"},
+    "issue":   {"list", "view", "status"},
+    "repo":    {"list", "view"},
+    "release": {"list", "view"},
+    "run":     {"list", "view"},
+    "workflow": {"list", "view"},
+    "api":     True,  # gh api is read-only (GET) by default
+}
+
+
 # AWS CLI read-only operation prefixes (e.g., describe-instances, list-buckets, get-object)
 AWS_READ_ONLY_VERBS = ("describe-", "list-", "get-", "head-", "batch-get-")
 
@@ -433,6 +469,43 @@ def is_safe_aws(command: str) -> bool:
     return False
 
 
+def is_safe_gh(command: str) -> bool:
+    """Check if a GitHub CLI command is read-only.
+
+    Parses `gh [flags] <resource> <operation>` and checks against
+    GH_READ_ONLY_OPS. Conservative — unknown resources/operations
+    fall through to Tier 3.
+    """
+    tokens = command.split()
+    if len(tokens) < 2:
+        return False
+
+    # Extract non-flag tokens after 'gh'
+    non_flag = [t for t in tokens[1:] if not t.startswith("-")]
+    if not non_flag:
+        return False
+
+    resource = non_flag[0]
+
+    # 'gh help' is always safe
+    if resource == "help":
+        return True
+
+    allowed_ops = GH_READ_ONLY_OPS.get(resource)
+    if allowed_ops is None:
+        return False
+
+    # gh api is always safe (GET by default)
+    if allowed_ops is True:
+        return True
+
+    if len(non_flag) < 2:
+        return False
+
+    operation = non_flag[1]
+    return operation in allowed_ops
+
+
 def is_safe_bash(command: str) -> bool:
     """Check if a bash command matches safe patterns."""
     cmd = command.strip()
@@ -445,17 +518,23 @@ def is_safe_bash(command: str) -> bool:
         return False
     # Use the cleaned command for all further checks
     cmd = cmd_for_meta.strip()
+    # Normalize `git -C <path>` to `git <subcommand>` before matching.
+    # The -C flag only changes the repo directory — doesn't affect safety.
+    cmd_for_match = re.sub(r"^(git)\s+-C\s+\S+\s+", r"\1 ", cmd)
     # Generic --version / -version / --help is always safe (read-only introspection)
     if cmd.endswith(" --version") or cmd.endswith(" -version") or cmd == "--version":
         return True
     if cmd.endswith(" --help") or cmd.endswith(" -help") or cmd == "--help":
         return True
-    if cmd in SAFE_BASH_EXACT:
+    if cmd_for_match in SAFE_BASH_EXACT:
         return True
-    if any(cmd.startswith(prefix) for prefix in SAFE_BASH_PREFIXES):
+    if any(cmd_for_match.startswith(prefix) for prefix in SAFE_BASH_PREFIXES):
         return True
     # AWS CLI read-only commands
-    if cmd.startswith("aws ") and is_safe_aws(cmd):
+    if cmd_for_match.startswith("aws ") and is_safe_aws(cmd_for_match):
+        return True
+    # GitHub CLI read-only commands
+    if cmd_for_match.startswith("gh ") and is_safe_gh(cmd_for_match):
         return True
     return False
 

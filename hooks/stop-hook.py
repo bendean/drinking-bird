@@ -176,7 +176,7 @@ COMPLETION_PREFIXES = [
     "Done.", "Done!", "Committed", "Created", "Updated", "Deleted",
     "Fixed", "Added", "Removed", "Merged", "Pushed", "Deployed",
     "Installed", "Built", "Passed", "Completed", "Finished",
-    "All tests pass", "All done",
+    "All tests pass", "All done", "Copied", "Opened",
 ]
 
 # "Ball is in your court" messages — Claude is idle, user was already notified.
@@ -219,7 +219,7 @@ def classify_local(last_message: str):
     # "Now " is narrowed to "Now <verb>" to avoid false positives when Claude
     # narrates its own actions ("Now let me verify...", "Now add the gap...").
     import re
-    if re.match(r"^(Please |Run |Try |Check |Test |Start |Stop |Open |Go |Now (?:run |try |check |test |start |stop |open |go ))", text, re.IGNORECASE):
+    if re.match(r"^(Please |Run |Try |Check |Test |Start |Stop |Open |Go |Refresh |Now (?:run |try |check |test |start |stop |open |go |refresh ))", text, re.IGNORECASE):
         return "NOTIFY"
     # Starts with completion word and no question = informational
     for prefix in COMPLETION_PREFIXES:
