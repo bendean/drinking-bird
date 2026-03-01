@@ -15,6 +15,7 @@ import json
 import sys
 import subprocess
 import os
+import re
 import urllib.request
 from datetime import datetime
 
@@ -176,7 +177,7 @@ COMPLETION_PREFIXES = [
     "Done.", "Done!", "Committed", "Created", "Updated", "Deleted",
     "Fixed", "Added", "Removed", "Merged", "Pushed", "Deployed",
     "Installed", "Built", "Passed", "Completed", "Finished",
-    "All tests pass", "All done", "Copied", "Opened",
+    "All tests pass", "All done", "All set", "Copied", "Opened",
 ]
 
 # "Ball is in your court" messages — Claude is idle, user was already notified.
@@ -195,6 +196,25 @@ IDLE_PATTERNS = [
     "Take your time",
     "No action needed",
 ]
+
+
+_IMPERATIVE_RE = re.compile(
+    r"^(Please |Run |Try |Check |Test |Start |Stop |Open |Go |Fill |Copy |Paste "
+    r"|Refresh |Now (?:run |try |check |test |start |stop |open |go |fill |copy |refresh ))",
+    re.IGNORECASE,
+)
+
+
+def _has_imperative(text: str) -> bool:
+    """Check if text (or any sentence within it) starts with an imperative verb."""
+    # Check the text itself
+    if _IMPERATIVE_RE.match(text):
+        return True
+    # Check sentences after sentence-ending punctuation
+    for sent in re.split(r"(?<=[.!])\s+", text):
+        if _IMPERATIVE_RE.match(sent.strip()):
+            return True
+    return False
 
 
 def classify_local(last_message: str):
@@ -218,12 +238,16 @@ def classify_local(last_message: str):
     # These tell the user to do something — they need to act.
     # "Now " is narrowed to "Now <verb>" to avoid false positives when Claude
     # narrates its own actions ("Now let me verify...", "Now add the gap...").
-    import re
-    if re.match(r"^(Please |Run |Try |Check |Test |Start |Stop |Open |Go |Refresh |Now (?:run |try |check |test |start |stop |open |go |refresh ))", text, re.IGNORECASE):
+    if _IMPERATIVE_RE.match(text):
         return "NOTIFY"
     # Starts with completion word and no question = informational
+    # BUT: check if a follow-up sentence contains an instruction (e.g.
+    # "Done. Now fill in the placeholders" should NOTIFY, not SILENT).
     for prefix in COMPLETION_PREFIXES:
         if text.startswith(prefix):
+            rest = text[len(prefix):].strip()
+            if rest and _has_imperative(rest):
+                return "NOTIFY"
             return "SILENT"
     # Ambiguous — fall through to Claude
     return None

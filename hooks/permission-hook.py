@@ -235,6 +235,7 @@ SAFE_BASH_EXACT = {
     "pytest",
     "sw_vers",
     "uname -a",
+    "hostname",
     "brew list",
 }
 

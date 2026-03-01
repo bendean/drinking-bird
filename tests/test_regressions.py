@@ -168,6 +168,12 @@ class TestPermissionRegressions:
         assert not permission_hook.is_safe_bash("aws ec2 stop-instances --instance-ids i-1234")
         assert not permission_hook.is_safe_bash("aws rds delete-db-instance --db-instance-identifier mydb")
 
+    def test_2026_03_01_hostname_safe(self):
+        '''`hostname` was going to Tier 3 (Claude evaluation). It's a read-only
+        command that shows the machine hostname. Recommended in CLAUDE.md for
+        determining which machine you're on.'''
+        assert permission_hook.is_safe_bash("hostname")
+
     def test_2026_02_14_env_example_not_sensitive(self):
         '''`.env.example` was blocked by substring match on `.env.`.
         Example files are templates — they never contain real secrets.'''
@@ -405,6 +411,35 @@ class TestStopHookRegressions:
         assert result2 == "NOTIFY"
         result3 = stop_hook.classify_local("Run the build and let me know if it passes.")
         assert result3 == "NOTIFY"
+
+    def test_2026_03_01_all_set_completion_silent(self):
+        '''`"All set. Here's what I did: 1. Created a Python 3.13 venv..."` was
+        classified as NOTIFY by Tier 3 Claude. "All set" is a common completion
+        phrase — should be SILENT locally.'''
+        result = stop_hook.classify_local("All set. Here's what I did: 1. Created a Python 3.13 venv at mlb-project/backend/.venv")
+        assert result == "SILENT"
+
+    def test_2026_03_01_completion_followed_by_instruction_notify(self):
+        '''`"Done. Now fill in the three placeholders..."` was classified SILENT
+        because "Done." matched COMPLETION_PREFIXES and returned early. But the
+        rest of the message is an instruction. Completion prefix should not
+        short-circuit when followed by imperative instructions.'''
+        # Completion followed by instruction — should NOTIFY
+        result = stop_hook.classify_local("Done. Now fill in the three placeholders: nano ~/.openclaw/openclaw.json")
+        assert result == "NOTIFY"
+        result2 = stop_hook.classify_local("Fixed. Please restart the server and check the logs.")
+        assert result2 == "NOTIFY"
+        result3 = stop_hook.classify_local("Updated. Now run the build to verify.")
+        assert result3 == "NOTIFY"
+        result4 = stop_hook.classify_local("Installed. Try opening the app and check if the layout looks correct.")
+        assert result4 == "NOTIFY"
+        # Pure completion — should still be SILENT
+        result5 = stop_hook.classify_local("Done.")
+        assert result5 == "SILENT"
+        result6 = stop_hook.classify_local("Done. All tests pass.")
+        assert result6 == "SILENT"
+        result7 = stop_hook.classify_local("Fixed the authentication bug.")
+        assert result7 == "SILENT"
 
     def test_2026_02_18_now_prefix_false_positive(self):
         '''"Now let me verify systematically" and "Now add the gap between the two rows:"
