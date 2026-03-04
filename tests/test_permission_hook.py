@@ -780,9 +780,10 @@ class TestSummarizeInput:
 class TestAlwaysAskBashPatterns:
     """Commands matching ALWAYS_ASK_BASH_PATTERNS always fall through to user."""
 
-    def test_git_commit_falls_through(self):
+    def test_git_commit_auto_approved(self):
+        """git commit is safe — auto-approved via SAFE_BASH_PREFIXES."""
         result = run_hook_capture("Bash", {"command": "git commit -m 'fix bug'"})
-        assert result == {}
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
 
     def test_git_push_falls_through(self):
         result = run_hook_capture("Bash", {"command": "git push origin main"})
@@ -811,7 +812,7 @@ class TestAlwaysAskBashPatterns:
 
     @patch.object(hook.subprocess, "run")
     def test_git_commit_never_calls_claude(self, mock_run):
-        """Always-ask should bypass Tier 3 entirely."""
+        """git commit is Tier 1 — no subprocess call needed."""
         run_hook_capture("Bash", {"command": "git commit -m 'msg'"})
         mock_run.assert_not_called()
 
@@ -860,3 +861,63 @@ class TestIsSafeBashExtended:
     def test_piped_version_still_blocked(self):
         """Piped commands should NOT be auto-approved even with --version."""
         assert hook.is_safe_bash("node --version | grep v18") is False
+
+
+# ============================================================================
+# Tests for git commit auto-approval
+# ============================================================================
+
+
+class TestGitCommitAutoApproval:
+    """git add && git commit patterns should be auto-approved."""
+
+    def test_simple_git_commit(self):
+        assert hook.is_safe_bash("git commit -m 'fix bug'") is True
+
+    def test_git_commit_amend(self):
+        assert hook.is_safe_bash("git commit --amend") is True
+
+    def test_git_add_and_commit_compound(self):
+        """Standard Claude Code commit pattern with &&."""
+        cmd = 'git add file.py && git commit -m "feat: add feature"'
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_git_add_and_commit_heredoc(self):
+        """Full heredoc pattern that Claude Code generates."""
+        cmd = """git add file.py && git commit -m "$(cat <<'EOF'
+feat: add new feature
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+EOF
+)\""""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_git_add_multiple_files_and_commit(self):
+        cmd = 'git add a.py b.py c.py && git commit -m "fix: stuff"'
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_git_add_dot_and_commit(self):
+        cmd = 'git add . && git commit -m "chore: update"'
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_compound_not_starting_with_git_add(self):
+        """Only git add && git commit is safe, not arbitrary && git commit."""
+        cmd = 'echo hi && git commit -m "sneaky"'
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_git_add_and_commit_integration(self):
+        """Integration test: compound commit goes through main() as ALLOW."""
+        cmd = 'git add file.py && git commit -m "feat: test"'
+        result = run_hook_capture("Bash", {"command": cmd})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    def test_git_add_and_commit_heredoc_integration(self):
+        """Integration test: heredoc commit pattern auto-approved."""
+        cmd = """git add file.py && git commit -m "$(cat <<'EOF'
+feat: add feature
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+EOF
+)\""""
+        result = run_hook_capture("Bash", {"command": cmd})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"

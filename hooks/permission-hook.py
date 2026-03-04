@@ -89,7 +89,6 @@ PASSTHROUGH_BASH_COMMANDS = {"drinking-bird-test"}
 
 # Bash patterns that always require user confirmation — never auto-approved or auto-denied.
 ALWAYS_ASK_BASH_PATTERNS = [
-    "git commit",
     "git push",
     "git merge ",
     "git branch -d ",
@@ -210,6 +209,7 @@ SAFE_BASH_PREFIXES = [
     "git check-ignore",
     "git worktree list",
     "git rev-parse",
+    "git commit ",
 ]
 
 # Exact-match safe bash commands
@@ -507,6 +507,21 @@ def is_safe_gh(command: str) -> bool:
     return operation in allowed_ops
 
 
+def _is_safe_git_compound(command: str) -> bool:
+    """Recognize safe compound git commands like 'git add ... && git commit -m ...'
+
+    The standard Claude Code commit pattern chains git add with git commit
+    using a heredoc for the message: git add files && git commit -m "$(cat <<'EOF'...)"
+    This contains &&, $(, and < which trigger shell meta-char detection, but the
+    pattern is safe — the single-quoted heredoc prevents expansion.
+    """
+    # Must start with git add and chain into git commit (and nothing else after)
+    return bool(re.match(
+        r"git\s+add\s+.+&&\s*git\s+commit\s",
+        command,
+    ))
+
+
 def is_safe_bash(command: str) -> bool:
     """Check if a bash command matches safe patterns."""
     cmd = command.strip()
@@ -514,6 +529,10 @@ def is_safe_bash(command: str) -> bool:
     # 2>&1 and 2>/dev/null don't change command safety.
     cmd_for_meta = re.sub(r"\s*2>&1\s*$", "", cmd)
     cmd_for_meta = re.sub(r"\s*2>/dev/null\s*$", "", cmd_for_meta)
+    # Safe compound git commands (git add && git commit) — checked before
+    # meta-char detection because the heredoc commit pattern contains $( and &&.
+    if _is_safe_git_compound(cmd_for_meta):
+        return True
     # Compound/piped/redirected commands are never auto-approved.
     if any(meta in cmd_for_meta for meta in SHELL_META_CHARS):
         return False
