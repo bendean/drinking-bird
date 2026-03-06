@@ -174,7 +174,7 @@ Respond with EXACTLY one word: NOTIFY or SILENT
 # ============================================================================
 
 COMPLETION_PREFIXES = [
-    "Done.", "Done!", "Committed", "Created", "Updated", "Deleted",
+    "Done", "Committed", "Created", "Updated", "Deleted",
     "Fixed", "Added", "Removed", "Merged", "Pushed", "Deployed",
     "Installed", "Built", "Passed", "Completed", "Finished",
     "All tests pass", "All done", "All set", "Copied", "Opened",
@@ -200,7 +200,8 @@ IDLE_PATTERNS = [
 
 _IMPERATIVE_RE = re.compile(
     r"^(Please |Run |Try |Check |Test |Start |Stop |Open |Go |Fill |Copy |Paste "
-    r"|Refresh |Now (?:run |try |check |test |start |stop |open |go |fill |copy |refresh ))",
+    r"|Refresh |Take |Look "
+    r"|Now\s*[—–\-:,]?\s*(?:run |try |check |test |start |stop |open |go |fill |copy |paste |refresh |take |look ))",
     re.IGNORECASE,
 )
 
@@ -245,7 +246,9 @@ def classify_local(last_message: str):
     # "Done. Now fill in the placeholders" should NOTIFY, not SILENT).
     for prefix in COMPLETION_PREFIXES:
         if text.startswith(prefix):
-            rest = text[len(prefix):].strip()
+            # Strip leading punctuation left over from bare-word prefixes
+            # e.g. "Done:" → ":", "Done." → ".", "Done —" → " —"
+            rest = text[len(prefix):].lstrip(".:!,;—–- ").strip()
             if rest and _has_imperative(rest):
                 return "NOTIFY"
             return "SILENT"

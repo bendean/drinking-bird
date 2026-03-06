@@ -99,6 +99,17 @@ ALWAYS_ASK_BASH_PATTERNS = [
     "kill ",
 ]
 
+
+def _matches_always_ask(command: str) -> bool:
+    """Check if command matches any always-ask pattern with word boundaries.
+
+    Uses \\b so 'kill ' matches 'kill -9 1234' but not 'grep -i skill'.
+    """
+    for pattern in ALWAYS_ASK_BASH_PATTERNS:
+        if re.search(r"\b" + re.escape(pattern), command):
+            return True
+    return False
+
 # Bash commands that are always safe (prefix match)
 SAFE_BASH_PREFIXES = [
     "npm run ",
@@ -723,7 +734,7 @@ def main():
             return
 
         # Always-ask: commands that require user confirmation every time
-        if any(pattern in command for pattern in ALWAYS_ASK_BASH_PATTERNS):
+        if _matches_always_ask(command):
             reason = f"Always-ask pattern: {command}"
             log("PASSTHROUGH", tool_name, reason, tool_input)
             notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty)

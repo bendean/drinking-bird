@@ -21,6 +21,7 @@ To add a new regression:
 
 import importlib.util
 from pathlib import Path
+import re
 import pytest
 
 # Load hooks as modules (same pattern as existing tests)
@@ -321,6 +322,21 @@ class TestPermissionRegressions:
         # With -C flag (should normalize and still match)
         assert permission_hook.is_safe_bash("git -C /Users/ben/AI-Lab rev-parse HEAD")
 
+    def test_2026_03_04_kill_not_match_skill(self):
+        '''`grep -i skill | tail -30` triggered ALWAYS_ASK because "kill " substring
+        matched inside "skill ". The `kill ` pattern needs word-boundary matching
+        so it catches `kill -9 1234` but not `grep -i skill`.'''
+        # "skill" should NOT trigger always-ask "kill " pattern
+        cmd = 'grep -i "ready" /tmp/log | grep -i skill | tail -30'
+        assert not permission_hook._matches_always_ask(cmd), \
+            "'skill' should not trigger 'kill ' always-ask pattern"
+        # Actual kill commands should still match
+        assert permission_hook._matches_always_ask("kill -9 1234")
+        assert permission_hook._matches_always_ask("pkill node")
+        # git commit/push should still match
+        assert permission_hook._matches_always_ask("git commit -m 'msg'")
+        assert permission_hook._matches_always_ask("git push origin main")
+
     def test_2026_02_25_git_merge_base_not_always_ask(self):
         '''`git merge-base` inside $(…) triggered ALWAYS_ASK "git merge" substring match.
         `git merge-base` is a read-only plumbing command — it prints commit SHAs.
@@ -481,6 +497,55 @@ class TestStopHookRegressions:
         assert stop_hook.classify_local("Refresh /audit. The card detail meta strip now shows the game date.") == "NOTIFY"
         assert stop_hook.classify_local("Refresh the page to see the changes.") == "NOTIFY"
         assert stop_hook.classify_local("Refresh your browser and check the layout.") == "NOTIFY"
+
+    def test_2026_03_03_done_colon_completion_silent(self):
+        '''"Done: - AI-Lab root: spec committed to `main`..." went to Tier 3 Claude
+        instead of local SILENT classification. COMPLETION_PREFIXES had "Done." and
+        "Done!" but not "Done:" — inconsistent with bare-word prefixes like
+        "Committed", "Created". Fix: replace "Done."/"Done!" with bare "Done".'''
+        # "Done:" variant — should be SILENT locally
+        assert stop_hook.classify_local("Done: - AI-Lab root: spec committed to main") == "SILENT"
+        assert stop_hook.classify_local("Done: all files committed and pushed.") == "SILENT"
+        assert stop_hook.classify_local("Done — here's a summary of changes.") == "SILENT"
+        # Existing "Done." and "Done!" should still work
+        assert stop_hook.classify_local("Done.") == "SILENT"
+        assert stop_hook.classify_local("Done!") == "SILENT"
+        assert stop_hook.classify_local("Done. All tests pass.") == "SILENT"
+        # "Done" followed by instruction should still NOTIFY
+        assert stop_hook.classify_local("Done. Now run the tests.") == "NOTIFY"
+        assert stop_hook.classify_local("Done: Now paste the token.") == "NOTIFY"
+
+    def test_2026_03_04_take_a_look_imperative_notify(self):
+        '''"Done — copied to M4 and opened. Take a look and let me know what direction
+        you want to go." was classified SILENT because "Take " was missing from the
+        imperative verb list. "Take a look" is a clear instruction to the user.'''
+        # "Take a look" after completion prefix — should NOTIFY
+        assert stop_hook.classify_local("Done — copied to M4 and opened. Take a look and let me know what direction you want to go.") == "NOTIFY"
+        assert stop_hook.classify_local("Updated. Take a look at the new layout.") == "NOTIFY"
+        # Standalone "Take a look" — should NOTIFY
+        assert stop_hook.classify_local("Take a look at the output and let me know.") == "NOTIFY"
+        # "Look at" as an imperative — should NOTIFY
+        assert stop_hook.classify_local("Look at the console output for errors.") == "NOTIFY"
+        assert stop_hook.classify_local("Done. Look at the diff and confirm.") == "NOTIFY"
+
+    def test_2026_03_02_now_emdash_paste_notify(self):
+        '''"Done. Now — paste your new bot token and I'll update the config."
+        was classified SILENT (local) because _IMPERATIVE_RE didn't match
+        "Now — paste". Two issues: (1) em-dash between "Now" and verb breaks
+        the pattern, (2) "paste" was missing from Now sub-verbs.'''
+        # Em-dash between "Now" and imperative verb — should NOTIFY
+        assert stop_hook.classify_local("Done. Now — paste your new bot token and I'll update the config.") == "NOTIFY"
+        # En-dash and colon variants should also work
+        assert stop_hook.classify_local("Done. Now – paste the key into the form.") == "NOTIFY"
+        assert stop_hook.classify_local("Done. Now: paste the token below.") == "NOTIFY"
+        # "Now paste" (no punctuation) should also work
+        assert stop_hook.classify_local("Done. Now paste your new bot token.") == "NOTIFY"
+        # Existing "Now <verb>" patterns should still work with em-dash
+        assert stop_hook.classify_local("Done. Now — run the tests.") == "NOTIFY"
+        assert stop_hook.classify_local("Done. Now — check the logs.") == "NOTIFY"
+        # Claude narrating its own actions should NOT be affected
+        assert stop_hook.classify_local("Now let me verify the changes.") != "NOTIFY"
+        assert stop_hook.classify_local("Now add the gap between rows.") != "NOTIFY"
 
 
 # ============================================================================
