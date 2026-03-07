@@ -518,6 +518,17 @@ def is_safe_gh(command: str) -> bool:
     return operation in allowed_ops
 
 
+def _strip_cd_prefix(command: str) -> str:
+    """Strip a leading 'cd <path> &&' from a compound command.
+
+    `cd` in a subprocess only sets the working directory for the rest of the
+    command — it has no side effects. Stripping it lets safe-pattern matching
+    work on commands like 'cd ~/project && git add ... && git commit ...'.
+    """
+    m = re.match(r"cd\s+\S+\s*&&\s*", command)
+    return command[m.end():] if m else command
+
+
 def _is_safe_git_compound(command: str) -> bool:
     """Recognize safe compound git commands like 'git add ... && git commit -m ...'
 
@@ -540,6 +551,8 @@ def is_safe_bash(command: str) -> bool:
     # 2>&1 and 2>/dev/null don't change command safety.
     cmd_for_meta = re.sub(r"\s*2>&1\s*$", "", cmd)
     cmd_for_meta = re.sub(r"\s*2>/dev/null\s*$", "", cmd_for_meta)
+    # Strip leading `cd <path> &&` — just sets working directory, no side effects.
+    cmd_for_meta = _strip_cd_prefix(cmd_for_meta)
     # Safe compound git commands (git add && git commit) — checked before
     # meta-char detection because the heredoc commit pattern contains $( and &&.
     if _is_safe_git_compound(cmd_for_meta):

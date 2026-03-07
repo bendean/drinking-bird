@@ -921,3 +921,32 @@ EOF
 )\""""
         result = run_hook_capture("Bash", {"command": cmd})
         assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    def test_cd_prefix_git_add_and_commit(self):
+        """cd into project dir before git add && commit should be auto-approved."""
+        cmd = 'cd ~/AI-Lab/mlb-project && git add file.py && git commit -m "feat: stuff"'
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_cd_prefix_git_add_and_commit_heredoc(self):
+        """cd prefix with full heredoc commit pattern."""
+        cmd = """cd ~/AI-Lab/mlb-project && git add backend/file.py && git commit -m "$(cat <<'EOF'
+phase1.6: research post-run hook
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+EOF
+)\""""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_cd_prefix_git_add_and_commit_integration(self):
+        """Integration: cd + git add + commit goes through main() as ALLOW."""
+        cmd = 'cd ~/AI-Lab/project && git add file.py && git commit -m "feat: test"'
+        result = run_hook_capture("Bash", {"command": cmd})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    def test_cd_prefix_simple_safe_command(self):
+        """cd prefix with a simple safe command like pytest."""
+        assert hook.is_safe_bash("cd ~/project && python3 -m pytest tests/") is True
+
+    def test_cd_prefix_unsafe_command_still_blocked(self):
+        """cd prefix doesn't make unsafe commands safe."""
+        assert hook.is_safe_bash("cd /tmp && rm -rf /") is False
