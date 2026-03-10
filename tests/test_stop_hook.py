@@ -392,9 +392,81 @@ class TestClassifyLocal:
     def test_ambiguous_returns_none(self):
         assert hook.classify_local("I've made some changes to the codebase.") is None
 
-    def test_done_with_question_notify(self):
-        """Question mark should win over completion prefix."""
+    def test_done_with_question_in_last_sentence_notify(self):
+        """Completion prefix + question in last sentence = NOTIFY."""
         assert hook.classify_local("Done. Should I also update the docs?") == "NOTIFY"
+
+    # --- Regression: false NOTIFYs from 2026-03-10 logs ---
+
+    def test_completion_with_trailing_offer_silent(self):
+        """'Done. X works now. Want me to do anything else?' — completion, not actionable."""
+        assert hook.classify_local(
+            "Done. ShotPut now works in both image apps and terminals. "
+            "The key fix was adding file URL as text representation."
+        ) == "SILENT"
+
+    def test_all_tasks_complete_silent(self):
+        """'All 6 tasks complete' is a completion even with ? in body."""
+        assert hook.classify_local(
+            "All 6 tasks complete, code review fixes committed. Here's the final state: "
+            "**ShotPut** builds and runs. Need anything else?"
+        ) == "SILENT"
+
+    def test_plan_saved_silent(self):
+        """Plan saved is informational."""
+        assert hook.classify_local(
+            "Plan saved to `docs/plans/2026-03-10-c5-2-substitution-events.md`. "
+            "**Two execution steps** outlined — ready when you are."
+        ) == "SILENT"
+
+    def test_design_section_ending_with_question_notify(self):
+        """Last sentence IS a question — NOTIFY is correct even in design output."""
+        assert hook.classify_local(
+            "**Section 2: Triage API Changes**\n\n"
+            "**Current triage endpoint (`GET /triage`):**\n"
+            "Returns items with labels. Should we add filtering?"
+        ) == "NOTIFY"
+
+    def test_status_with_question_only_in_middle_not_notify(self):
+        """Question buried in the middle, last sentence is a statement — not NOTIFY."""
+        result = hook.classify_local(
+            "Data is clean. Here's the summary:\n\n"
+            "Did you know there were 5 edge cases?\n\n"
+            "All rows match the expected values."
+        )
+        assert result != "NOTIFY"
+
+    def test_informational_status_ending_with_statement_falls_through(self):
+        """Status report ending with a statement should not be NOTIFY."""
+        result = hook.classify_local(
+            "Data is clean. Here's the summary:\n\n"
+            "**C5.1 Transaction Archive — Verified**\n\n"
+            "| Test | Expected | Actual |\nAll rows match perfectly."
+        )
+        assert result != "NOTIFY"
+
+    def test_completion_with_question_in_last_sentence_notify(self):
+        """Completion prefix but last sentence asks a question — NOTIFY."""
+        assert hook.classify_local(
+            "Pushed. The only remaining diff is the symlinked `docs/plans/` file — "
+            "not a real change. Want me to clean it up?"
+        ) == "NOTIFY"
+
+    def test_completion_with_question_only_in_middle_silent(self):
+        """Completion prefix, ? only in middle sentence, last sentence is a statement."""
+        assert hook.classify_local(
+            "Pushed. The diff looked odd — was that expected? "
+            "Either way, all changes are on origin/main now."
+        ) == "SILENT"
+
+    def test_now_narrative_not_imperative(self):
+        """'Now I can see the gap' is narration, not an instruction to the user."""
+        result = hook.classify_local(
+            "Now I can see the gap clearly. Side by side: "
+            "**BILLY.md v2.0** vs **SOUL.md** — the voice section diverges."
+        )
+        # "Now I..." is not an imperative — should not be NOTIFY
+        assert result != "NOTIFY"
 
     def test_empty_returns_none(self):
         assert hook.classify_local("") is None

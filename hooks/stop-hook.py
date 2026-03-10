@@ -178,7 +178,11 @@ COMPLETION_PREFIXES = [
     "Fixed", "Added", "Removed", "Merged", "Pushed", "Deployed",
     "Installed", "Built", "Passed", "Completed", "Finished",
     "All tests pass", "All done", "All set", "Copied", "Opened",
+    "Plan saved", "Plan complete",
 ]
+
+# Regex for messages that start with "All N ..." (e.g. "All 6 tasks complete")
+_ALL_N_RE = re.compile(r"^All \d+\s", re.IGNORECASE)
 
 # "Ball is in your court" messages — Claude is idle, user was already notified.
 # These fire repeatedly when background tasks complete and cause notification loops.
@@ -218,40 +222,72 @@ def _has_imperative(text: str) -> bool:
     return False
 
 
+def _split_sentences(text: str):
+    """Split text into sentences on .!? + whitespace or newlines."""
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text.strip()) if s.strip()]
+
+
+def _last_sentence_has_question(text: str) -> bool:
+    """Check if the last sentence contains a '?'."""
+    sentences = _split_sentences(text)
+    return bool(sentences) and "?" in sentences[-1]
+
+
+def _ends_or_starts_with_question(text: str) -> bool:
+    """Check if the first or last sentence contains a question mark.
+    Middle sentences are ignored — a '?' buried in paragraph 3 of a status
+    report is noise, not a signal."""
+    sentences = _split_sentences(text)
+    if not sentences:
+        return False
+    if "?" in sentences[-1]:
+        return True
+    if "?" in sentences[0]:
+        return True
+    return False
+
+
 def classify_local(last_message: str):
     """Fast local classification. Returns 'NOTIFY', 'SILENT', or None (fall through to Claude)."""
     if not last_message or not last_message.strip():
         return None
     text = last_message.strip()
     # Idle/standing-by patterns — Claude is waiting, user was already notified.
-    # Check BEFORE "?" so "Waiting for your call — X or Y?" is still SILENT.
+    # Check BEFORE everything else so "Waiting for your call — X or Y?" is still SILENT.
     for pattern in IDLE_PATTERNS:
         if text.startswith(pattern):
             return "SILENT"
-    # Question mark anywhere = user needs to respond
-    if "?" in text:
+    # Completion prefixes — checked BEFORE the global "?" rule so that
+    # "Pushed. The only diff is..." with a stray ? in the body is SILENT.
+    # BUT: if the REST of the message has a direct question (last sentence)
+    # or an imperative, the user still needs to act → NOTIFY.
+    for prefix in COMPLETION_PREFIXES:
+        if text.startswith(prefix):
+            rest = text[len(prefix):].lstrip(".:!,;—–- ").strip()
+            if rest and _has_imperative(rest):
+                return "NOTIFY"
+            if rest and _last_sentence_has_question(rest):
+                return "NOTIFY"
+            rest_tail = rest[-100:] if rest else ""
+            if "Ready for" in rest_tail or "ready for" in rest_tail:
+                return "NOTIFY"
+            return "SILENT"
+    # "All N ..." pattern (e.g. "All 6 tasks complete") — treat like completion
+    if _ALL_N_RE.match(text):
+        return "SILENT"
+    # Question in last sentence = user needs to respond.
+    # Only the LAST sentence matters — a ? buried in a status report body is noise.
+    if _ends_or_starts_with_question(text):
         return "NOTIFY"
     # "Ready for" near the end = user needs to act
     tail = text[-100:]
     if "Ready for" in tail or "ready for" in tail:
         return "NOTIFY"
     # Imperative instruction: "Run the build", "Please restart", "Now run tests"
-    # These tell the user to do something — they need to act.
     # "Now " is narrowed to "Now <verb>" to avoid false positives when Claude
     # narrates its own actions ("Now let me verify...", "Now add the gap...").
     if _IMPERATIVE_RE.match(text):
         return "NOTIFY"
-    # Starts with completion word and no question = informational
-    # BUT: check if a follow-up sentence contains an instruction (e.g.
-    # "Done. Now fill in the placeholders" should NOTIFY, not SILENT).
-    for prefix in COMPLETION_PREFIXES:
-        if text.startswith(prefix):
-            # Strip leading punctuation left over from bare-word prefixes
-            # e.g. "Done:" → ":", "Done." → ".", "Done —" → " —"
-            rest = text[len(prefix):].lstrip(".:!,;—–- ").strip()
-            if rest and _has_imperative(rest):
-                return "NOTIFY"
-            return "SILENT"
     # Ambiguous — fall through to Claude
     return None
 
