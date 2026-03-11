@@ -950,3 +950,126 @@ EOF
     def test_cd_prefix_unsafe_command_still_blocked(self):
         """cd prefix doesn't make unsafe commands safe."""
         assert hook.is_safe_bash("cd /tmp && rm -rf /") is False
+
+
+# ============================================================================
+# Tests for heredoc interpreter auto-approval
+# ============================================================================
+
+
+class TestHeredocInterpreterAutoApproval:
+    """python3/node/ruby heredoc commands should be auto-approved.
+
+    Claude Code generates `python3 << 'PYEOF'` commands with inline scripts.
+    These contain `<<` which triggers the shell meta-char check on `<`.
+    Single-quoted heredocs prevent shell expansion, and the interpreter
+    runs in the same security context, so they're safe.
+    """
+
+    def test_python3_heredoc_single_quoted(self):
+        """python3 << 'PYEOF' with inline script should be safe."""
+        cmd = """python3 << 'PYEOF'
+import json
+print(json.dumps({"hello": "world"}))
+PYEOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_python3_heredoc_double_quoted(self):
+        """python3 << \"PYEOF\" (double-quoted) allows shell expansion — NOT safe."""
+        cmd = """python3 << "PYEOF"
+import os
+print(os.environ)
+PYEOF"""
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_python3_heredoc_unquoted(self):
+        """python3 << PYEOF (unquoted) allows shell expansion — NOT safe."""
+        cmd = """python3 << PYEOF
+import os
+print(os.environ)
+PYEOF"""
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_node_heredoc_single_quoted(self):
+        """node << 'EOF' should be safe."""
+        cmd = """node << 'EOF'
+console.log(JSON.stringify({hello: "world"}));
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_ruby_heredoc_single_quoted(self):
+        """ruby << 'EOF' should be safe."""
+        cmd = """ruby << 'EOF'
+puts "hello"
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_python_heredoc_single_quoted(self):
+        """python (not python3) << 'EOF' should be safe."""
+        cmd = """python << 'EOF'
+print("hello")
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_bash_heredoc_not_safe(self):
+        """bash << 'EOF' should NOT be auto-approved (shell can do anything)."""
+        cmd = """bash << 'EOF'
+rm -rf /tmp/stuff
+EOF"""
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_sh_heredoc_not_safe(self):
+        """sh << 'EOF' should NOT be auto-approved."""
+        cmd = """sh << 'EOF'
+echo hello
+EOF"""
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_heredoc_with_cd_prefix(self):
+        """cd prefix + heredoc interpreter should work."""
+        cmd = """cd ~/project && python3 << 'PYEOF'
+import json
+print("hi")
+PYEOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_heredoc_long_script(self):
+        """Long heredoc scripts (like the user's screenshot) should be safe."""
+        cmd = """python3 << 'PYEOF'
+import json, glob, os
+
+sessions = glob.glob(os.path.expanduser("~/.openclaw/agents/billy/sessions/*.jsonl"))
+sessions.sort(key=os.path.getmtime, reverse=True)
+
+with open(sessions[0]) as f:
+    lines = f.readlines()
+
+for line in lines:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+    except:
+        continue
+    print(obj.get("type", ""))
+PYEOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_heredoc_integration_auto_approved(self):
+        """Integration: python3 heredoc goes through main() as ALLOW."""
+        cmd = """python3 << 'PYEOF'
+import json
+print(json.dumps({"test": True}))
+PYEOF"""
+        result = run_hook_capture("Bash", {"command": cmd})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    def test_heredoc_dangerous_content_still_caught(self):
+        """Heredoc containing dangerous patterns should still be caught by Tier 2."""
+        cmd = """python3 << 'PYEOF'
+import os
+os.system("rm -rf /")
+PYEOF"""
+        # Tier 2 catches "rm -rf /" in the raw command string
+        assert hook.is_dangerous_bash(cmd) is True

@@ -423,6 +423,11 @@ def notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty=None
 # Commands containing these are never auto-approved — they fall through to Tier 3.
 SHELL_META_CHARS = ["|", ";", "&&", "||", "`", "$(", ">", "<", "&"]
 
+# Interpreters safe for single-quoted heredoc auto-approval.
+# These run inline code in the same security context. Shell interpreters
+# (bash, sh, zsh) are excluded — they can do anything.
+SAFE_HEREDOC_INTERPRETERS = {"python3", "python", "node", "ruby", "perl"}
+
 
 # GitHub CLI (gh) read-only subcommand operations
 # Format: gh <resource> <operation> — only these operations are safe per resource
@@ -529,6 +534,20 @@ def _strip_cd_prefix(command: str) -> str:
     return command[m.end():] if m else command
 
 
+def _is_safe_heredoc(command: str) -> bool:
+    """Recognize safe interpreter heredoc commands like python3 << 'PYEOF'.
+
+    Single-quoted heredocs prevent shell variable expansion, and the interpreter
+    runs inline code in the same security context as writing a temp file.
+    Only safe interpreters are allowed — bash/sh/zsh are excluded.
+    """
+    return bool(re.match(
+        r"(" + "|".join(re.escape(i) for i in SAFE_HEREDOC_INTERPRETERS) + r")"
+        r"\s+<<\s*'[A-Za-z_]+'\s*\n",
+        command,
+    ))
+
+
 def _is_safe_git_compound(command: str) -> bool:
     """Recognize safe compound git commands like 'git add ... && git commit -m ...'
 
@@ -556,6 +575,11 @@ def is_safe_bash(command: str) -> bool:
     # Safe compound git commands (git add && git commit) — checked before
     # meta-char detection because the heredoc commit pattern contains $( and &&.
     if _is_safe_git_compound(cmd_for_meta):
+        return True
+    # Safe interpreter heredocs (python3 << 'EOF') — checked before meta-char
+    # detection because << triggers the < meta-char. Only single-quoted
+    # delimiters (no shell expansion) with safe interpreters.
+    if _is_safe_heredoc(cmd_for_meta):
         return True
     # Compound/piped/redirected commands are never auto-approved.
     if any(meta in cmd_for_meta for meta in SHELL_META_CHARS):
