@@ -6,6 +6,10 @@ Routes permission requests through a tiered system:
   Tier 2: Auto-deny known dangerous operations (instant)
   Tier 3: Ask Claude via CLI for ambiguous cases (~2-5s)
 
+Autonomous mode (DISPATCH_MODE=autonomous):
+  Tier 1 and Tier 2 unchanged. Tier 3 auto-approves instead of asking
+  Claude or the user. Set via environment variable in dispatch.sh.
+
 Uses your existing Claude subscription via `claude --print` — no API key needed.
 
 Install:
@@ -703,6 +707,16 @@ Respond with EXACTLY one word: ALLOW, DENY, or ASK
         return "ask"
 
 
+def is_autonomous_mode():
+    """Check if running in autonomous dispatch mode.
+
+    When DISPATCH_MODE=autonomous, Tier 3 decisions auto-approve instead of
+    asking Claude or the user. Tier 1 (safe) and Tier 2 (dangerous) are
+    unchanged — destructive commands are still blocked.
+    """
+    return os.environ.get("DISPATCH_MODE") == "autonomous"
+
+
 def main():
     # Read hook input from stdin
     try:
@@ -717,6 +731,7 @@ def main():
     cwd = input_data.get("cwd", os.getcwd())
     session_id = input_data.get("session_id", "")
     transcript_path = input_data.get("transcript_path", "")
+    autonomous = is_autonomous_mode()
 
     # Discover terminal TTY for window matching
     tty = get_tty()
@@ -727,7 +742,13 @@ def main():
     # --- User-interactive tools: always fall through ---
     # These tools exist to interact with the user; auto-approving them
     # silently swallows the prompt and returns empty input to Claude.
+    # In autonomous mode, auto-approve (no user to interact with).
     if tool_name in USER_INTERACTIVE_TOOLS:
+        if autonomous:
+            reason = f"Autonomous: auto-approve user-interactive tool: {tool_name}"
+            log("ALLOW", tool_name, reason, tool_input)
+            approve(reason)
+            return
         reason = f"User-interactive tool: {tool_name}"
         log("PASSTHROUGH", tool_name, reason, tool_input)
         notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty)
@@ -737,7 +758,13 @@ def main():
     # --- MCP tools: always fall through ---
     # MCP tools are external integrations with unpredictable side effects.
     # Tier 3 Claude rubber-stamps them, so let the user decide.
+    # In autonomous mode, auto-approve.
     if tool_name.startswith("mcp__"):
+        if autonomous:
+            reason = f"Autonomous: auto-approve MCP tool: {tool_name}"
+            log("ALLOW", tool_name, reason, tool_input)
+            approve(reason)
+            return
         reason = f"MCP tool: {tool_name}"
         log("PASSTHROUGH", tool_name, reason, tool_input)
         notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty)
@@ -771,7 +798,13 @@ def main():
             return
 
         # Always-ask: commands that require user confirmation every time
+        # In autonomous mode, auto-approve (Tier 2 dangerous check above still blocks)
         if _matches_always_ask(command):
+            if autonomous:
+                reason = f"Autonomous: auto-approve always-ask: {command}"
+                log("ALLOW", tool_name, reason, tool_input)
+                approve(reason)
+                return
             reason = f"Always-ask pattern: {command}"
             log("PASSTHROUGH", tool_name, reason, tool_input)
             notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty)
@@ -792,7 +825,12 @@ def main():
             approve(reason)
             return
 
-        # Tier 3: Ambiguous — ask Claude
+        # Tier 3: Ambiguous — ask Claude (or auto-approve in autonomous mode)
+        if autonomous:
+            reason = f"Autonomous: auto-approve ambiguous command: {command}"
+            log("ALLOW", tool_name, reason, tool_input)
+            approve(reason)
+            return
         notify_hud_tier3(session_id, tty)
         decision = ask_claude(tool_name, tool_input, cwd)
         if decision == "allow":
@@ -824,7 +862,12 @@ def main():
             log("ALLOW", tool_name, reason, tool_input)
             approve(reason)
             return
-        # For writes outside project, ask Claude
+        # For writes outside project, ask Claude (or auto-approve in autonomous mode)
+        if autonomous:
+            reason = f"Autonomous: auto-approve file operation: {file_path}"
+            log("ALLOW", tool_name, reason, tool_input)
+            approve(reason)
+            return
         notify_hud_tier3(session_id, tty)
         decision = ask_claude(tool_name, tool_input, cwd)
         if decision == "allow":
@@ -842,7 +885,12 @@ def main():
             ask_user(reason)
         return
 
-    # --- TIER 3: Everything else — ask Claude ---
+    # --- TIER 3: Everything else — ask Claude (or auto-approve in autonomous mode) ---
+    if autonomous:
+        reason = f"Autonomous: auto-approve: {tool_name}"
+        log("ALLOW", tool_name, reason, tool_input)
+        approve(reason)
+        return
     notify_hud_tier3(session_id, tty)
     decision = ask_claude(tool_name, tool_input, cwd)
     if decision == "allow":
