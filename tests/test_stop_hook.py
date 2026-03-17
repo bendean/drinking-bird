@@ -30,16 +30,22 @@ hook = load_hook()
 
 
 def make_transcript(messages):
-    """Build JSONL content from a list of (role, content_type, content_value) tuples.
+    """Build JSONL content from a list of tuples.
+
+    Each tuple is (role, content_type, content_value) or
+    (role, content_type, content_value, timestamp_iso).
 
     Examples:
         make_transcript([
             ("user", "text", "Hello"),
             ("assistant", "text", "Hi there!"),
+            ("user", "text", "Bye", "2026-03-16T10:00:00Z"),
         ])
     """
     lines = []
-    for role, content_type, content_value in messages:
+    for item in messages:
+        role, content_type, content_value = item[0], item[1], item[2]
+        timestamp = item[3] if len(item) > 3 else None
         if content_type == "text":
             content = [{"type": "text", "text": content_value}]
         elif content_type == "tool_use":
@@ -52,6 +58,8 @@ def make_transcript(messages):
             "type": role,
             "message": {"role": role, "content": content},
         }
+        if timestamp:
+            entry["timestamp"] = timestamp
         lines.append(json.dumps(entry))
     return "\n".join(lines) + "\n"
 
@@ -571,6 +579,100 @@ class TestDebounce:
 # ============================================================================
 
 
+# ============================================================================
+# Tests for _is_session_active()
+# ============================================================================
+
+
+class TestIsSessionActive:
+    """Activity window check — suppress NOTIFY in active sessions."""
+
+    def test_recent_user_message_returns_true(self, tmp_path):
+        """User message within window → session is active."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        recent_ts = (now - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        path = write_transcript(tmp_path, [
+            ("user", "text", "Hello", recent_ts),
+            ("assistant", "text", "Hi there!"),
+        ])
+        assert hook._is_session_active(path) is True
+
+    def test_old_user_message_returns_false(self, tmp_path):
+        """User message older than window → session is NOT active."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        old_ts = (now - timedelta(seconds=300)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        path = write_transcript(tmp_path, [
+            ("user", "text", "Start this long task", old_ts),
+            ("assistant", "text", "Done with the long task."),
+        ])
+        assert hook._is_session_active(path) is False
+
+    def test_no_user_messages_returns_false(self, tmp_path):
+        """No user messages in transcript → not active."""
+        path = write_transcript(tmp_path, [
+            ("assistant", "text", "Background task completed."),
+        ])
+        assert hook._is_session_active(path) is False
+
+    def test_no_timestamp_on_user_message_returns_false(self, tmp_path):
+        """User message without timestamp → can't determine, not active."""
+        path = write_transcript(tmp_path, [
+            ("user", "text", "Hello"),
+            ("assistant", "text", "Response"),
+        ])
+        assert hook._is_session_active(path) is False
+
+    def test_missing_file_returns_false(self):
+        """Non-existent transcript → not active."""
+        assert hook._is_session_active("/nonexistent/transcript.jsonl") is False
+
+    def test_empty_file_returns_false(self, tmp_path):
+        """Empty transcript → not active."""
+        path = tmp_path / "empty.jsonl"
+        path.write_text("")
+        assert hook._is_session_active(str(path)) is False
+
+    def test_custom_window(self, tmp_path):
+        """Custom window_seconds parameter."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        # 90 seconds ago — within 120s default but outside 60s custom window
+        ts = (now - timedelta(seconds=90)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        path = write_transcript(tmp_path, [
+            ("user", "text", "Hello", ts),
+            ("assistant", "text", "Response"),
+        ])
+        assert hook._is_session_active(path, window_seconds=60) is False
+        assert hook._is_session_active(path, window_seconds=120) is True
+
+    def test_uses_last_user_message_not_first(self, tmp_path):
+        """Should check the LAST user message, not the first."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        old_ts = (now - timedelta(seconds=600)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        recent_ts = (now - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        path = write_transcript(tmp_path, [
+            ("user", "text", "First message", old_ts),
+            ("assistant", "text", "First response"),
+            ("user", "text", "Recent message", recent_ts),
+            ("assistant", "text", "Latest response"),
+        ])
+        assert hook._is_session_active(path) is True
+
+    def test_malformed_timestamp_returns_false(self, tmp_path):
+        """Malformed timestamp → can't parse, not active."""
+        content = json.dumps({
+            "type": "user",
+            "timestamp": "not-a-date",
+            "message": {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+        }) + "\n"
+        path = tmp_path / "transcript.jsonl"
+        path.write_text(content)
+        assert hook._is_session_active(str(path)) is False
+
+
 class TestMainLocalClassify:
     """Local classification should skip Claude call."""
 
@@ -603,6 +705,68 @@ class TestMainLocalClassify:
                      mock_last_text="Done. All changes applied.")
         mock_classify.assert_not_called()
         mock_hud.assert_not_called()
+
+
+class TestMainActivityWindow:
+    """Active session should suppress NOTIFY."""
+
+    def test_active_session_suppresses_notify(self, tmp_path):
+        """When session is active, even a NOTIFY-worthy message should be SILENT."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        recent_ts = (now - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        # Build a transcript with recent user message + question-ending assistant message
+        path = write_transcript(tmp_path, [
+            ("user", "text", "What should we do next?", recent_ts),
+            ("assistant", "text", "Should I proceed with the migration?"),
+        ])
+        input_data = {
+            "session_id": "s",
+            "cwd": "/tmp",
+            "transcript_path": str(path),
+        }
+        with patch.object(hook, "notify_hud_session_idle") as mock_hud, \
+             patch.object(hook, "classify_message") as mock_classify, \
+             patch.object(hook, "log") as mock_log, \
+             patch.object(hook, "_should_debounce", return_value=False), \
+             patch.object(hook, "_update_debounce"):
+            with pytest.raises(SystemExit):
+                with patch("sys.stdin", io.StringIO(json.dumps(input_data))):
+                    hook.main()
+        # HUD should NOT be notified
+        mock_hud.assert_not_called()
+        # Claude classifier should NOT be called
+        mock_classify.assert_not_called()
+        # Should log as SILENT with (active) tag
+        mock_log.assert_called()
+        log_args = mock_log.call_args[0]
+        assert log_args[0] == "SILENT"
+        assert "(active)" in log_args[2]
+
+    def test_inactive_session_allows_notify(self, tmp_path):
+        """When session is NOT active, classification runs normally."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        old_ts = (now - timedelta(seconds=300)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        path = write_transcript(tmp_path, [
+            ("user", "text", "Start this long task", old_ts),
+            ("assistant", "text", "Should I proceed with the migration?"),
+        ])
+        input_data = {
+            "session_id": "s",
+            "cwd": "/tmp",
+            "transcript_path": str(path),
+        }
+        with patch.object(hook, "notify_hud_session_idle") as mock_hud, \
+             patch.object(hook, "get_tty", return_value=None), \
+             patch.object(hook, "log"), \
+             patch.object(hook, "_should_debounce", return_value=False), \
+             patch.object(hook, "_update_debounce"):
+            with pytest.raises(SystemExit):
+                with patch("sys.stdin", io.StringIO(json.dumps(input_data))):
+                    hook.main()
+        # The question mark message should trigger NOTIFY via local classify
+        mock_hud.assert_called_once()
 
 
 class TestMainDebounce:

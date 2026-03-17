@@ -293,6 +293,41 @@ def classify_local(last_message: str):
 
 
 # ============================================================================
+# SESSION ACTIVITY CHECK
+# ============================================================================
+
+ACTIVITY_WINDOW_SECONDS = 120
+
+
+def _is_session_active(transcript_path: str, window_seconds: int = None) -> bool:
+    """Check if the user sent a message recently, indicating an active session.
+    Returns True if the last user message timestamp is within window_seconds of now."""
+    if window_seconds is None:
+        window_seconds = ACTIVITY_WINDOW_SECONDS
+    try:
+        with open(transcript_path, "r") as f:
+            lines = f.readlines()
+        # Walk backwards to find last user message with a timestamp
+        for line in reversed(lines):
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("type") == "user" and entry.get("timestamp"):
+                ts_str = entry["timestamp"]
+                # Parse ISO 8601 timestamp
+                ts_str = ts_str.replace("Z", "+00:00")
+                from datetime import timezone
+                ts = datetime.fromisoformat(ts_str)
+                now = datetime.now(timezone.utc)
+                age = (now - ts).total_seconds()
+                return age < window_seconds
+        return False
+    except Exception:
+        return False
+
+
+# ============================================================================
 # DEBOUNCE
 # ============================================================================
 
@@ -365,6 +400,11 @@ def main():
     summary = last_message[:80].replace("\n", " ")
     if len(last_message) > 80:
         summary += "..."
+
+    # Activity window: if user sent a message recently, session is active — skip NOTIFY
+    if _is_session_active(transcript_path):
+        log("SILENT", project, f'"{summary}" (active)')
+        sys.exit(0)
 
     # Fast local classification (skip Claude for obvious cases)
     local_decision = classify_local(last_message)
