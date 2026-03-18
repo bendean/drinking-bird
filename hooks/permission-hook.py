@@ -611,25 +611,45 @@ def is_safe_bash(command: str) -> bool:
     return False
 
 
-def is_dangerous_bash(command: str) -> bool:
-    """Check if a bash command matches dangerous patterns."""
+def is_doomsday_bash(command: str) -> bool:
+    """Block only catastrophic commands — the last-resort safety net.
+
+    These are things no legitimate session should ever run. Used in
+    autonomous mode where everything else is auto-approved.
+    """
     cmd = command.strip().lower()
-    if any(pattern in cmd for pattern in DANGEROUS_BASH_PATTERNS):
-        return True
-    # Path-boundary checks for rm -rf with root/home targets.
-    # Uses negative lookahead so "rm -rf /tmp/foo" is NOT matched,
-    # but "rm -rf /", "rm -rf / ", "rm -rf /;" ARE matched.
+    # Wipe root or home directory
     if re.search(r"\brm\s+-rf\s+/(?![a-z0-9._\-])", cmd):
         return True
     if re.search(r"\brm\s+-rf\s+~(?!/[a-z0-9._\-])", cmd):
         return True
     if re.search(r"\brm\s+-rf\s+\$home(?!/[a-z0-9._\-])", cmd):
         return True
-    # Pipe-chain detection: curl/wget ... | sh/bash
+    # Fork bomb
+    if ":(){:|:&};:" in cmd:
+        return True
+    # Remote code execution via pipe
     if re.search(r"\b(curl|wget)\b.*\|\s*(sh|bash)\b", cmd):
         return True
-    # Eval subshell detection: eval $(curl ...) / eval $(wget ...)
     if re.search(r"\beval\s+\$\((curl|wget)\b", cmd):
+        return True
+    # Disk destruction
+    if "mkfs." in cmd or "> /dev/sda" in cmd or "dd if=" in cmd:
+        return True
+    return False
+
+
+def is_dangerous_bash(command: str) -> bool:
+    """Check if a bash command matches dangerous patterns (interactive mode).
+
+    Broader than is_doomsday_bash — includes sudo, sensitive file access,
+    chmod 777, etc. that are legitimate in autonomous sessions but warrant
+    user confirmation in interactive ones.
+    """
+    cmd = command.strip().lower()
+    if any(pattern in cmd for pattern in DANGEROUS_BASH_PATTERNS):
+        return True
+    if is_doomsday_bash(command):
         return True
     return False
 
@@ -773,9 +793,10 @@ def main():
 
     # --- TIER 1: Auto-approve safe tools ---
     if tool_name in SAFE_TOOLS:
-        # Check if reading sensitive files
+        # Check if reading sensitive files (skip in autonomous mode —
+        # trusted sessions need .env, credentials, etc.)
         file_path = tool_input.get("file_path", "") or tool_input.get("path", "")
-        if file_path and is_sensitive_file(file_path):
+        if file_path and not autonomous and is_sensitive_file(file_path):
             reason = f"Blocked read of sensitive file: {file_path}"
             log("DENY", tool_name, reason, tool_input)
             deny(reason)
@@ -811,8 +832,15 @@ def main():
             ask_user(reason)
             return
 
-        # Tier 2: Block dangerous commands immediately
-        if is_dangerous_bash(command):
+        # Tier 2: Block dangerous commands
+        # Autonomous mode: only block doomsday commands (rm -rf /, fork bomb, pipe-to-shell)
+        # Interactive mode: broader set (sudo, chmod 777, sensitive file access, etc.)
+        if autonomous and is_doomsday_bash(command):
+            reason = f"Blocked doomsday command: {command}"
+            log("DENY", tool_name, reason, tool_input)
+            deny(reason)
+            return
+        if not autonomous and is_dangerous_bash(command):
             reason = f"Blocked dangerous command: {command}"
             log("DENY", tool_name, reason, tool_input)
             deny(reason)
@@ -851,7 +879,9 @@ def main():
     # --- TIER 1: Auto-approve Write/Edit within project ---
     if tool_name in {"Write", "Edit", "MultiEdit"}:
         file_path = tool_input.get("file_path", "")
-        if file_path and is_sensitive_file(file_path):
+        # Skip sensitive file check in autonomous mode — trusted sessions
+        # need to write .env, config files, etc.
+        if file_path and not autonomous and is_sensitive_file(file_path):
             reason = f"Blocked write to sensitive file: {file_path}"
             log("DENY", tool_name, reason, tool_input)
             deny(reason)
