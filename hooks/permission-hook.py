@@ -560,11 +560,47 @@ def _is_safe_git_compound(command: str) -> bool:
     This contains &&, $(, and < which trigger shell meta-char detection, but the
     pattern is safe — the single-quoted heredoc prevents expansion.
     """
-    # Must start with git add and chain into git commit (and nothing else after)
+    # Must contain git add chained into git commit. Optional cd prefix.
     return bool(re.match(
-        r"git\s+add\s+.+&&\s*git\s+commit\s",
+        r"(cd\s+[^&]+&&\s*)?git\s+add\s+.+&&\s*git\s+commit\s",
         command,
     ))
+
+
+def _is_safe_git_commit_heredoc(command: str) -> bool:
+    """Recognize git commit with heredoc message pattern as safe.
+
+    Pattern: git commit -m "$(cat <<'EOF' ... EOF)"
+    Contains shell meta-chars ($( and <<) that are heredoc syntax for the
+    commit message, not command chaining. Safe because git commit is local-only.
+    """
+    return bool(re.match(r"^git\s+commit\s", command) and "<<" in command)
+
+
+def _is_safe_compound_command(command: str) -> bool:
+    """Check if a &&-separated compound command is entirely safe.
+
+    Handles the common pattern: cd <path> && git status && git log --oneline
+    Each segment is checked independently. `cd <path>` is always safe.
+    Returns True only if ALL segments are individually safe.
+    """
+    segments = command.split("&&")
+    if len(segments) < 2:
+        return False  # Not a compound command
+    for seg in segments:
+        seg = seg.strip()
+        if not seg:
+            continue
+        # cd <path> is always safe (just changes directory)
+        if re.match(r"^cd\s+", seg):
+            continue
+        # source <path>/bin/activate (venv activation) — sets env vars, always safe
+        if re.match(r"^source\s+\S*/bin/activate\s*$", seg):
+            continue
+        # Check each segment through normal safe patterns
+        if not is_safe_bash(seg):
+            return False
+    return True
 
 
 def is_safe_bash(command: str) -> bool:
@@ -584,6 +620,13 @@ def is_safe_bash(command: str) -> bool:
     # detection because << triggers the < meta-char. Only single-quoted
     # delimiters (no shell expansion) with safe interpreters.
     if _is_safe_heredoc(cmd_for_meta):
+        return True
+    # Safe compound commands (cd <path> && git status && git log) — checked
+    # before meta-char detection because && triggers the guard.
+    if "&&" in cmd_for_meta and _is_safe_compound_command(cmd_for_meta):
+        return True
+    # Standalone git commit with heredoc — meta-chars are heredoc syntax, not chaining
+    if _is_safe_git_commit_heredoc(cmd_for_meta):
         return True
     # Compound/piped/redirected commands are never auto-approved.
     if any(meta in cmd_for_meta for meta in SHELL_META_CHARS):

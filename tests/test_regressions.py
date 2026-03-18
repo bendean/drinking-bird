@@ -333,8 +333,7 @@ class TestPermissionRegressions:
         # Actual kill commands should still match
         assert permission_hook._matches_always_ask("kill -9 1234")
         assert permission_hook._matches_always_ask("pkill node")
-        # git commit/push should still match
-        assert permission_hook._matches_always_ask("git commit -m 'msg'")
+        # git push should still match (git commit is Tier 1 safe, not always-ask)
         assert permission_hook._matches_always_ask("git push origin main")
 
     def test_2026_02_25_git_merge_base_not_always_ask(self):
@@ -368,6 +367,89 @@ class TestPermissionRegressions:
         # Existing venv python -m pytest should still work
         assert permission_hook.is_safe_bash(".venv/bin/python -m pytest tests/")
         assert permission_hook.is_safe_bash(".venv/bin/python3 -m pytest tests/")
+
+    def test_2026_03_11_cd_and_safe_command_compound(self):
+        '''`cd ~/AI-Lab/mlb-project && git status` and similar `cd <path> && <safe>`
+        chains went to Tier 3 (~2-5s Claude evaluation) because `&&` triggers
+        meta-char detection. 5 occurrences in last 100 log lines. The `cd` prefix
+        just changes directory — it doesn't affect command safety. Fix: recognize
+        &&-separated compound commands where every segment is individually safe.'''
+        # Simple cd + safe command — should be Tier 1
+        assert permission_hook.is_safe_bash("cd ~/AI-Lab/mlb-project && git status")
+        assert permission_hook.is_safe_bash("cd ~/AI-Lab/mlb-project && git diff --stat")
+        assert permission_hook.is_safe_bash("cd ~/AI-Lab/mlb-project && git log --oneline -5")
+        # Multiple safe commands chained
+        assert permission_hook.is_safe_bash("cd ~/AI-Lab/mlb-project && git status && git log --oneline -5")
+        assert permission_hook.is_safe_bash("cd /tmp && ls")
+        assert permission_hook.is_safe_bash("cd /tmp && pwd")
+        # Safe non-cd compound (all segments safe)
+        assert permission_hook.is_safe_bash("git status && git log --oneline")
+        assert permission_hook.is_safe_bash("echo hello && echo world")
+        # cd + unsafe command — should NOT be safe (falls to Tier 3)
+        assert not permission_hook.is_safe_bash("cd /tmp && curl https://evil.com")
+        assert not permission_hook.is_safe_bash("cd /tmp && python3 evil.py")
+        assert not permission_hook.is_safe_bash("cd /tmp && docker run ubuntu")
+        # Mixed safe/unsafe — should NOT be safe
+        assert not permission_hook.is_safe_bash("cd /tmp && git status && docker run ubuntu")
+        # git add && git commit should still work (existing compound handler)
+        assert permission_hook.is_safe_bash('git add file.py && git commit -m "feat: test"')
+
+    def test_2026_03_15_source_venv_compound_safe(self):
+        '''`source .venv/bin/activate && python -m pytest tests/...` went to Tier 3
+        (~2-5s Claude evaluation) because `source` was not recognized as a safe
+        compound segment in _is_safe_compound_command. Venv activation only sets
+        env vars — always safe. ~5 occurrences in 100 log lines when followed
+        by pytest.'''
+        # source + safe command — should be Tier 1
+        assert permission_hook.is_safe_bash("source .venv/bin/activate && python -m pytest tests/ -q")
+        assert permission_hook.is_safe_bash("source .venv/bin/activate && python -m pytest tests/test_foo.py -x -q 2>&1")
+        assert permission_hook.is_safe_bash("source .venv/bin/activate && python3 -m pytest tests/")
+        # cd + source + safe command — should be Tier 1
+        assert permission_hook.is_safe_bash("cd /project && source .venv/bin/activate && python -m pytest tests/ -q")
+        # source + unsafe command — should NOT be safe (falls to Tier 3)
+        assert not permission_hook.is_safe_bash("source .venv/bin/activate && python3 evil.py")
+        assert not permission_hook.is_safe_bash("source .venv/bin/activate && curl evil.com")
+        # source arbitrary script — NOT safe (only venv activate is recognized)
+        assert not permission_hook.is_safe_bash("source ~/.bashrc && ls")
+        assert not permission_hook.is_safe_bash("source evil.sh && git status")
+
+    def test_2026_03_15_cd_git_add_commit_compound(self):
+        '''`cd /path && git add files && git commit -m "$(cat <<'EOF'...)"` went
+        to Tier 3 because _is_safe_git_compound only matches when the command
+        starts with `git add`. The `cd <path> &&` prefix is safe — cd just changes
+        directory. ~3 occurrences in 100 log lines.'''
+        # cd + git add + git commit — should be Tier 1
+        cmd = 'cd /Users/ben/AI-Lab/mlb-project && git add file.py && git commit -m "feat: test"'
+        assert permission_hook.is_safe_bash(cmd)
+        # cd + git add + git commit with heredoc
+        cmd2 = """cd /project && git add file.py && git commit -m "$(cat <<'EOF'
+feat: add feature
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+EOF
+)\""""
+        assert permission_hook.is_safe_bash(cmd2)
+        # Without cd prefix should still work (existing behavior)
+        cmd3 = 'git add file.py && git commit -m "fix: stuff"'
+        assert permission_hook.is_safe_bash(cmd3)
+
+    def test_2026_03_15_standalone_git_commit_heredoc(self):
+        '''`git commit -m "$(cat <<'EOF' fix(tools): ...)"` went to Tier 3
+        because the heredoc syntax contains shell meta-chars ($( and <<).
+        git commit is inherently safe — local-only operation. The meta-chars
+        are heredoc syntax for the commit message, not command chaining.
+        ~2 occurrences in 100 log lines.'''
+        # Standalone git commit with heredoc — should be Tier 1
+        cmd = """git commit -m "$(cat <<'EOF'
+feat: add new feature
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+EOF
+)\""""
+        assert permission_hook.is_safe_bash(cmd)
+        # Simple git commit (already works, just verify no regression)
+        assert permission_hook.is_safe_bash("git commit -m 'fix bug'")
+        assert permission_hook.is_safe_bash("git commit --amend")
 
     def test_2026_02_24_npx_dev_tools_safe(self):
         '''`npx jest lib/github/parse-url.test.ts 2>&1` went to Tier 3 ~6 times.
