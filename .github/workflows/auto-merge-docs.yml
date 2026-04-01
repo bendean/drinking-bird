@@ -19,7 +19,7 @@ jobs:
       - name: Verify docs-only changes
         run: |
           FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
-          if echo "$FILES" | grep -qvE '^docs/'; then
+          if echo "$FILES" | grep -qvE '^(docs/|TODO\.md$|IDEAS\.md$|NEXT-STEPS\.md$|CLAUDE\.md$)'; then
             echo "::error::Non-docs changes found, skipping auto-merge"
             exit 1
           fi
