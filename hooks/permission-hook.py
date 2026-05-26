@@ -79,7 +79,9 @@ def _summarize_input(tool_name: str, tool_input: dict) -> str:
 # ============================================================================
 
 # Tools that are always safe (read-only operations)
-SAFE_TOOLS = {"Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch"}
+# Skill: loads pre-registered skill content for Claude to read. Any actions
+# the skill prescribes go through their own permission checks.
+SAFE_TOOLS = {"Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "Skill"}
 
 # Tools that require user interaction — never auto-approve or auto-deny.
 # Auto-approving these silently answers with empty input instead of showing the prompt.
@@ -252,6 +254,8 @@ SAFE_BASH_EXACT = {
     "uname -a",
     "hostname",
     "brew list",
+    "python3 -V",
+    "python -V",
 }
 
 # ============================================================================
@@ -427,6 +431,25 @@ def notify_hud(session_id, cwd, tool_name, tool_input, transcript_path, tty=None
 # Commands containing these are never auto-approved — they fall through to Tier 3.
 SHELL_META_CHARS = ["|", ";", "&&", "||", "`", "$(", ">", "<", "&"]
 
+# Read-only filter commands safe as pipe targets.
+# These read from stdin, write to stdout, no side effects.
+SAFE_PIPE_FILTERS = {
+    "head", "tail", "grep", "egrep", "fgrep",
+    "sort", "wc", "cut", "uniq", "tr", "column",
+    "cat", "rev", "tac", "nl", "fold", "fmt",
+}
+
+# Curl data flags — indicate POST body normally, but become GET query params
+# when -G/--get is present. Safe in GET mode.
+CURL_DATA_FLAGS = {
+    "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
+}
+
+# Curl flags that always indicate a write operation, even with -G.
+CURL_WRITE_ONLY_FLAGS = {
+    "-X", "--request", "-F", "--form", "-T", "--upload-file",
+}
+
 # Interpreters safe for single-quoted heredoc auto-approval.
 # These run inline code in the same security context. Shell interpreters
 # (bash, sh, zsh) are excluded — they can do anything.
@@ -552,6 +575,40 @@ def _is_safe_heredoc(command: str) -> bool:
     ))
 
 
+def _is_safe_filter_heredoc(command: str) -> bool:
+    """Recognize single-quoted heredocs fed to read-only filters.
+
+    Pattern: cat <<'EOF' [| wc -c | ...]\n<body>\nEOF
+    The leading command and every pipe target must be read-only stdin/stdout
+    filters (cat, wc, head, grep, ...). The single-quoted delimiter makes the
+    body literal data — no command substitution or variable expansion — so the
+    only executable parts are the filter commands, which have no side effects.
+    Common in char-counting workflows: `cat <<'EOF' | wc -c`.
+    """
+    # Only the first line is a pipeline; everything after is literal heredoc body.
+    first_line = command.split("\n", 1)[0]
+    m = re.match(r"\s*(\w+)\s+<<\s*'[A-Za-z_]+'\s*(.*)$", first_line)
+    if not m:
+        return False
+    lead_cmd, rest = m.group(1), m.group(2).strip()
+    # Leading command must be a read-only filter (cat, head, grep, ...).
+    if lead_cmd not in SAFE_PIPE_FILTERS:
+        return False
+    # Bare `cat <<'EOF'` with no trailing pipeline is safe.
+    if not rest:
+        return True
+    # Otherwise the remainder must be `| filter [| filter ...]`.
+    if not rest.startswith("|"):
+        return False
+    for seg in _split_top_level_pipes(rest):
+        seg = seg.strip()
+        if not seg:
+            continue
+        if not _is_safe_pipe_filter(seg):
+            return False
+    return True
+
+
 def _is_safe_git_compound(command: str) -> bool:
     """Recognize safe compound git commands like 'git add ... && git commit -m ...'
 
@@ -575,6 +632,138 @@ def _is_safe_git_commit_heredoc(command: str) -> bool:
     commit message, not command chaining. Safe because git commit is local-only.
     """
     return bool(re.match(r"^git\s+commit\s", command) and "<<" in command)
+
+
+def _is_safe_curl(command: str) -> bool:
+    """Recognize read-only curl commands as safe (pre meta-char check).
+
+    URL query parameters contain & which triggers the shell meta-char guard.
+    A standalone curl GET without pipes, redirects, or write flags is safe.
+    Checked before meta-char detection to avoid URL & false positives.
+    """
+    if not command.startswith("curl "):
+        return False
+    # Shell operators that indicate chaining/piping (bare & is OK — it's in URLs)
+    for meta in ["|", ";", "&&", "||", "`", "$(", ">", "<"]:
+        if meta in command:
+            return False
+    tokens = command.split()
+    is_get_mode = "-G" in tokens or "--get" in tokens
+    for token in tokens[1:]:
+        # Always-write flags (explicit method, form upload) block regardless of -G
+        if token in CURL_WRITE_ONLY_FLAGS:
+            return False
+        # Data flags are write ops unless -G converts them to query params
+        if not is_get_mode and token in CURL_DATA_FLAGS:
+            return False
+    return True
+
+
+def _is_safe_pipe_filter(segment: str) -> bool:
+    """Check if a pipe segment is a read-only filter command."""
+    seg = segment.strip()
+    if not seg:
+        return False
+    tokens = seg.split()
+    cmd = tokens[0]
+    if cmd in SAFE_PIPE_FILTERS:
+        return True
+    # python3 -m json.tool is a read-only JSON formatter
+    if cmd in ("python3", "python") and len(tokens) >= 3 and tokens[1] == "-m" and tokens[2] == "json.tool":
+        return True
+    return False
+
+
+def _strip_quoted_strings(command: str) -> str:
+    """Replace contents of quoted strings with empty placeholders.
+
+    Used before meta-char detection so that quoted argument data (regex
+    alternation, special chars in URLs, etc.) doesn't trigger the guard.
+    Quotes themselves are kept as the placeholder. Backslash-escaped quotes
+    inside double-quotes are respected.
+    """
+    out = []
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if ch == "'":
+            # Single quotes — no escapes, find closing quote
+            out.append("''")
+            i += 1
+            while i < n and command[i] != "'":
+                i += 1
+            i += 1  # skip closing quote (or run off end)
+        elif ch == '"':
+            # Double quotes — backslash escapes the next char
+            out.append('""')
+            i += 1
+            while i < n and command[i] != '"':
+                if command[i] == "\\" and i + 1 < n:
+                    i += 2
+                else:
+                    i += 1
+            i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _split_top_level_pipes(command: str) -> list:
+    """Split on `|` only at the top level — outside quotes and not `||`.
+
+    A naive split breaks quoted regex like `grep "a\\|b" file | head` into
+    bogus segments. This walker tracks single/double-quote state and skips
+    `||` (logical or, which is not a pipe).
+    """
+    segments = []
+    buf = []
+    in_single = False
+    in_double = False
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            buf.append(ch)
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+            buf.append(ch)
+        elif ch == "|" and not in_single and not in_double:
+            # `||` is logical-or, not a pipe — leave untouched
+            if i + 1 < len(command) and command[i + 1] == "|":
+                buf.append("||")
+                i += 2
+                continue
+            segments.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    segments.append("".join(buf))
+    return segments
+
+
+def _is_safe_piped_command(command: str) -> bool:
+    """Check if a piped command is safe: safe source | safe filter(s).
+
+    Handles the common pattern: find ... | head -20, grep ... | wc -l, etc.
+    The source command must be a safe bash command, and all subsequent pipe
+    segments must be read-only filter commands.
+    """
+    segments = _split_top_level_pipes(command)
+    if len(segments) < 2:
+        return False
+    # First segment must be a safe command
+    first = segments[0].strip()
+    if not first or not is_safe_bash(first):
+        return False
+    # All subsequent segments must be read-only filters
+    for seg in segments[1:]:
+        if not _is_safe_pipe_filter(seg):
+            return False
+    return True
 
 
 def _is_safe_compound_command(command: str) -> bool:
@@ -612,6 +801,14 @@ def is_safe_bash(command: str) -> bool:
     cmd_for_meta = re.sub(r"\s*2>/dev/null\s*$", "", cmd_for_meta)
     # Strip leading `cd <path> &&` — just sets working directory, no side effects.
     cmd_for_meta = _strip_cd_prefix(cmd_for_meta)
+    # Safe piped commands (find ... | head, grep ... | wc -l) — checked before
+    # meta-char detection because | triggers the guard.
+    if "|" in cmd_for_meta and _is_safe_piped_command(cmd_for_meta):
+        return True
+    # Read-only curl commands — checked before meta-char detection because
+    # URL query parameters contain & which triggers the shell meta-char guard.
+    if _is_safe_curl(cmd_for_meta):
+        return True
     # Safe compound git commands (git add && git commit) — checked before
     # meta-char detection because the heredoc commit pattern contains $( and &&.
     if _is_safe_git_compound(cmd_for_meta):
@@ -621,6 +818,11 @@ def is_safe_bash(command: str) -> bool:
     # delimiters (no shell expansion) with safe interpreters.
     if _is_safe_heredoc(cmd_for_meta):
         return True
+    # Safe filter heredocs (cat <<'EOF' | wc -c) — literal body piped to
+    # read-only filters. Checked before meta-char detection because << and |
+    # trigger the guard.
+    if _is_safe_filter_heredoc(cmd_for_meta):
+        return True
     # Safe compound commands (cd <path> && git status && git log) — checked
     # before meta-char detection because && triggers the guard.
     if "&&" in cmd_for_meta and _is_safe_compound_command(cmd_for_meta):
@@ -629,7 +831,11 @@ def is_safe_bash(command: str) -> bool:
     if _is_safe_git_commit_heredoc(cmd_for_meta):
         return True
     # Compound/piped/redirected commands are never auto-approved.
-    if any(meta in cmd_for_meta for meta in SHELL_META_CHARS):
+    # Quoted strings are pure data (e.g. `grep "a|b" file`), so strip them
+    # before meta-char detection to avoid false-positives on regex alternation
+    # or special chars inside arguments.
+    cmd_for_meta_check = _strip_quoted_strings(cmd_for_meta)
+    if any(meta in cmd_for_meta_check for meta in SHELL_META_CHARS):
         return False
     # Use the cleaned command for all further checks
     cmd = cmd_for_meta.strip()
@@ -650,6 +856,9 @@ def is_safe_bash(command: str) -> bool:
         return True
     # GitHub CLI read-only commands
     if cmd_for_match.startswith("gh ") and is_safe_gh(cmd_for_match):
+        return True
+    # sed without -i/--in-place is read-only (output to stdout, no file modification)
+    if cmd_for_match.startswith("sed ") and " -i" not in cmd_for_match and "--in-place" not in cmd_for_match:
         return True
     return False
 

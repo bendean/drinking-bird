@@ -386,7 +386,7 @@ class TestPermissionRegressions:
         assert permission_hook.is_safe_bash("git status && git log --oneline")
         assert permission_hook.is_safe_bash("echo hello && echo world")
         # cd + unsafe command — should NOT be safe (falls to Tier 3)
-        assert not permission_hook.is_safe_bash("cd /tmp && curl https://evil.com")
+        assert not permission_hook.is_safe_bash("cd /tmp && docker run ubuntu bash")
         assert not permission_hook.is_safe_bash("cd /tmp && python3 evil.py")
         assert not permission_hook.is_safe_bash("cd /tmp && docker run ubuntu")
         # Mixed safe/unsafe — should NOT be safe
@@ -408,7 +408,7 @@ class TestPermissionRegressions:
         assert permission_hook.is_safe_bash("cd /project && source .venv/bin/activate && python -m pytest tests/ -q")
         # source + unsafe command — should NOT be safe (falls to Tier 3)
         assert not permission_hook.is_safe_bash("source .venv/bin/activate && python3 evil.py")
-        assert not permission_hook.is_safe_bash("source .venv/bin/activate && curl evil.com")
+        assert not permission_hook.is_safe_bash("source .venv/bin/activate && docker run ubuntu")
         # source arbitrary script — NOT safe (only venv activate is recognized)
         assert not permission_hook.is_safe_bash("source ~/.bashrc && ls")
         assert not permission_hook.is_safe_bash("source evil.sh && git status")
