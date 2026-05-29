@@ -659,6 +659,55 @@ def _is_safe_curl(command: str) -> bool:
     return True
 
 
+# Awk substrings that indicate side effects.
+# awk's system() runs shell commands; getline can read files/commands;
+# `print >`, `print |` write files or pipe to commands.
+AWK_UNSAFE_TOKENS = (
+    "system(", "system (",
+    "getline",
+    "> \"", "> '",
+    "| \"", "| '",
+)
+
+
+def _is_safe_awk(segment: str) -> bool:
+    """Check if an awk command segment is read-only.
+
+    Common safe shape: `awk '{ print length, $0 }'`. We allow awk only
+    when its script contains none of system()/getline/output-redirect.
+    """
+    return not any(t in segment for t in AWK_UNSAFE_TOKENS)
+
+
+def _is_safe_read_loop(segment: str) -> bool:
+    """Recognize a read-only `while read` line-processing loop.
+
+    Safe idiom for measuring/numbering lines from stdin:
+        while IFS= read -r line; do printf '%3d  %s\n' "${#line}" "$line"; done
+    Only printf/echo bodies are allowed, and the body must contain no command
+    substitution, redirects, pipes, or extra command separators — so the loop
+    writes to stdout and nothing else. Common in char-counting workflows where
+    each draft line's length is printed.
+    """
+    seg = segment.strip()
+    m = re.match(
+        r"^while\s+(?:IFS=\S*\s+)?read\s+(?:-r\s+)?\w+\s*;\s*do\s+(.*?)\s*;?\s*done$",
+        seg,
+    )
+    if not m:
+        return False
+    body = m.group(1).strip()
+    # Body must be only printf/echo — no other commands.
+    if not re.match(r"^(printf|echo)\b", body):
+        return False
+    # Reject anything that could escape the loop or touch the filesystem:
+    # command substitution, backticks, redirects, pipes, background, chaining.
+    for bad in ("$(", "`", ">", "<", "|", "&", ";"):
+        if bad in body:
+            return False
+    return True
+
+
 def _is_safe_pipe_filter(segment: str) -> bool:
     """Check if a pipe segment is a read-only filter command."""
     seg = segment.strip()
@@ -668,6 +717,12 @@ def _is_safe_pipe_filter(segment: str) -> bool:
     cmd = tokens[0]
     if cmd in SAFE_PIPE_FILTERS:
         return True
+    # awk is read-only by default, but system()/getline/redirect can have side effects
+    if cmd == "awk":
+        return _is_safe_awk(seg)
+    # `while read` line-measuring loop with a printf/echo-only body (no side effects)
+    if cmd == "while":
+        return _is_safe_read_loop(seg)
     # python3 -m json.tool is a read-only JSON formatter
     if cmd in ("python3", "python") and len(tokens) >= 3 and tokens[1] == "-m" and tokens[2] == "json.tool":
         return True

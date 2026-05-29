@@ -1369,3 +1369,82 @@ A clean tweet draft with no dangerous tokens.
 EOF"""
         result = run_hook_capture("Bash", {"command": cmd})
         assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+    def test_cat_heredoc_awk_print_length(self):
+        """cat <<'EOF' | awk '{ print length, $0 }' — pure read-only awk, safe."""
+        cmd = """cat <<'EOF' | awk '{ print length, $0 }'
+The two problems that AREN'T variance: bullpen depth and the rotation gap.
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_cat_heredoc_awk_printf(self):
+        """cat <<'EOF' | awk '{ printf ... }' — printf-only awk, safe."""
+        cmd = """cat <<'EOF' | awk '{ printf "%d  %s\\n", length, $0 }'
+some text
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_cat_heredoc_awk_system_blocked(self):
+        """awk with system() can run commands — NOT safe."""
+        cmd = """cat <<'EOF' | awk '{ system("rm -rf /tmp/x") }'
+trigger
+EOF"""
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_cat_heredoc_awk_getline_blocked(self):
+        """awk with getline can read external commands/files — NOT safe."""
+        cmd = """cat <<'EOF' | awk '{ "id" | getline u; print u }'
+trigger
+EOF"""
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_cat_heredoc_awk_file_redirect_blocked(self):
+        """awk with `print > "file"` writes a file — NOT safe."""
+        cmd = """cat <<'EOF' | awk '{ print $0 > "/tmp/out" }'
+data
+EOF"""
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_cat_heredoc_while_read_printf_line_length(self):
+        """cat <<'EOF' | while read; do printf len; done — line-measuring loop, safe.
+
+        Regression for a Tier 3 false denial (2026-05-27): a printf-only
+        while-read loop measuring each draft line's length was flagged unsafe
+        on shape alone. It has no side effects and should auto-approve.
+        """
+        cmd = """cat <<'EOF' | while IFS= read -r line; do printf '%3d  %s\\n' "${#line}" "$line"; done
+A draft tweet line here.
+Another line.
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_while_read_loop_helper_printf(self):
+        """The read-loop helper accepts a bare printf body."""
+        assert hook._is_safe_read_loop(
+            'while IFS= read -r line; do printf "%s\\n" "$line"; done'
+        ) is True
+
+    def test_while_read_loop_command_substitution_blocked(self):
+        """A read-loop body with command substitution is NOT safe."""
+        assert hook._is_safe_read_loop(
+            'while read line; do printf "%s" "$(rm -rf /tmp/x)"; done'
+        ) is False
+
+    def test_while_read_loop_redirect_blocked(self):
+        """A read-loop body that redirects to a file is NOT safe."""
+        assert hook._is_safe_read_loop(
+            'while read line; do printf "%s" "$line" > /tmp/out; done'
+        ) is False
+
+    def test_while_read_loop_non_printf_body_blocked(self):
+        """A read-loop body running an arbitrary command is NOT safe."""
+        assert hook._is_safe_read_loop(
+            'while read line; do rm "$line"; done'
+        ) is False
+
+    def test_cat_heredoc_while_read_dangerous_body_blocked(self):
+        """cat heredoc into a while-read loop that runs a command — NOT safe."""
+        cmd = """cat <<'EOF' | while read line; do eval "$line"; done
+whoami
+EOF"""
+        assert hook.is_safe_bash(cmd) is False
