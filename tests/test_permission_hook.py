@@ -1405,6 +1405,40 @@ data
 EOF"""
         assert hook.is_safe_bash(cmd) is False
 
+    def test_awk_heredoc_leading_print_length(self):
+        """awk '{ print length, $0 }' <<'EOF' — leading awk consuming a heredoc.
+
+        Regression for a Tier 3 false deferral (2026-05-31): the piped form
+        `cat <<'EOF' | awk ...` is instant Tier 1, but the equivalent leading
+        form `awk ... <<'EOF'` was kicked to claude -p because the heredoc
+        regex required the command word to abut `<<`. Both are read-only.
+        """
+        cmd = """awk '{ print length, $0 }' <<'EOF'
+The two problems that AREN'T variance: bullpen depth and the rotation gap.
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_awk_heredoc_leading_with_sub(self):
+        """awk '{ ...; sub(/re/,""); print ... }' <<'EOF' — sub() is read-only, safe."""
+        cmd = """awk '{ n=length($0); sub(/https?:\\/\\/[^ ]+/,""); print n, "(" length($0)+23 " on X)", $0 }' <<'EOF'
+@cubsinsider's read is right https://example.com/x
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_awk_heredoc_leading_system_blocked(self):
+        """Leading awk heredoc with system() is still blocked."""
+        cmd = """awk '{ system("rm -rf /tmp/x") }' <<'EOF'
+trigger
+EOF"""
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_awk_heredoc_leading_file_redirect_blocked(self):
+        """Leading awk heredoc with `print > "file"` is still blocked."""
+        cmd = """awk '{ print $0 > "/tmp/out" }' <<'EOF'
+data
+EOF"""
+        assert hook.is_safe_bash(cmd) is False
+
     def test_cat_heredoc_while_read_printf_line_length(self):
         """cat <<'EOF' | while read; do printf len; done — line-measuring loop, safe.
 

@@ -587,12 +587,19 @@ def _is_safe_filter_heredoc(command: str) -> bool:
     """
     # Only the first line is a pipeline; everything after is literal heredoc body.
     first_line = command.split("\n", 1)[0]
-    m = re.match(r"\s*(\w+)\s+<<\s*'[A-Za-z_]+'\s*(.*)$", first_line)
+    # Split the first line at the heredoc redirect `<<'DELIM'`. The left part is
+    # the command consuming the heredoc on stdin (e.g. `cat`, or `awk 'script'`);
+    # the right part is an optional `| filter ...` pipeline. Matching `<<` anywhere
+    # (not just abutting the command word) lets `awk '…' <<'EOF'` qualify the same
+    # way `cat <<'EOF' | awk '…'` already does — both are read-only.
+    m = re.match(r"\s*(.*?)\s*<<\s*'[A-Za-z_]+'\s*(.*)$", first_line)
     if not m:
         return False
-    lead_cmd, rest = m.group(1), m.group(2).strip()
-    # Leading command must be a read-only filter (cat, head, grep, ...).
-    if lead_cmd not in SAFE_PIPE_FILTERS:
+    lead_cmd, rest = m.group(1).strip(), m.group(2).strip()
+    # The heredoc-consuming command must itself be a read-only filter. Reuse the
+    # pipe-filter validator so awk (no system/getline/redirect), while-read loops,
+    # and the plain filters (cat, head, grep, ...) are all accepted consistently.
+    if not _is_safe_pipe_filter(lead_cmd):
         return False
     # Bare `cat <<'EOF'` with no trailing pipeline is safe.
     if not rest:
