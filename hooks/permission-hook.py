@@ -160,6 +160,7 @@ SAFE_BASH_PREFIXES = [
     "ls",
     "pwd",
     "echo ",
+    "printf ",
     "which ",
     "whoami",
     "date",
@@ -715,6 +716,13 @@ def _is_safe_read_loop(segment: str) -> bool:
     return True
 
 
+# Shell-control characters that must not appear in a (non-while) pipe-filter
+# segment. A filter is a single read-only command; chaining (;), backgrounding
+# (&), command substitution ($(, `), or redirects (>, <) hidden after the filter
+# word would otherwise ride along unchecked — e.g. `cat x | head; rm -rf ~`.
+PIPE_FILTER_FORBIDDEN = (";", "&", "`", "$(", ">", "<")
+
+
 def _is_safe_pipe_filter(segment: str) -> bool:
     """Check if a pipe segment is a read-only filter command."""
     seg = segment.strip()
@@ -722,14 +730,21 @@ def _is_safe_pipe_filter(segment: str) -> bool:
         return False
     tokens = seg.split()
     cmd = tokens[0]
+    # `while read` line-measuring loop with a printf/echo-only body (no side effects).
+    # Checked first because its body legitimately contains ';' (do ... done); the
+    # helper self-validates with an anchored full-match regex.
+    if cmd == "while":
+        return _is_safe_read_loop(seg)
+    # Every other filter must be a single command with nothing chained, substituted,
+    # backgrounded, or redirected after it. Quoted data is neutralized first so a
+    # literal ';' or '>' inside an argument (e.g. grep 'a;b') doesn't trip the guard.
+    if any(ch in _strip_quoted_strings(seg) for ch in PIPE_FILTER_FORBIDDEN):
+        return False
     if cmd in SAFE_PIPE_FILTERS:
         return True
     # awk is read-only by default, but system()/getline/redirect can have side effects
     if cmd == "awk":
         return _is_safe_awk(seg)
-    # `while read` line-measuring loop with a printf/echo-only body (no side effects)
-    if cmd == "while":
-        return _is_safe_read_loop(seg)
     # python3 -m json.tool is a read-only JSON formatter
     if cmd in ("python3", "python") and len(tokens) >= 3 and tokens[1] == "-m" and tokens[2] == "json.tool":
         return True
@@ -854,6 +869,125 @@ def _is_safe_compound_command(command: str) -> bool:
     return True
 
 
+def _split_top_level_seq(command: str) -> list:
+    """Split on top-level command separators `;`, `&&`, `||` — outside quotes.
+
+    Single `|` (pipe) and single `&` (background) are NOT separators here — pipes
+    are validated within a segment by is_safe_bash, and a bare `&` makes the
+    segment fall through to Tier 3. Quote-aware so a separator inside a string
+    (e.g. echo "a; b") is left intact.
+    """
+    segments = []
+    buf = []
+    in_single = in_double = False
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            buf.append(ch)
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+            buf.append(ch)
+        elif not in_single and not in_double and ch == ";":
+            segments.append("".join(buf))
+            buf = []
+        elif not in_single and not in_double and command[i:i + 2] in ("&&", "||"):
+            segments.append("".join(buf))
+            buf = []
+            i += 2
+            continue
+        else:
+            buf.append(ch)
+        i += 1
+    segments.append("".join(buf))
+    return segments
+
+
+def _is_safe_sequence(command: str) -> bool:
+    """Check if a `;`/`&&`/`||`-separated sequence is entirely safe.
+
+    Generalizes _is_safe_compound_command to unconditional (`;`) and short-circuit
+    (`||`) separators. Each segment is validated independently via is_safe_bash
+    (which itself handles single pipes and stderr redirects), so the sequence is
+    safe iff every segment is safe — running read-only commands in any order has
+    no side effects. `cd <path>` and venv activation are always-safe segments.
+    Common shape: `ls foo 2>/dev/null | head; echo "---"; ls bar`.
+    """
+    segments = _split_top_level_seq(command)
+    if len(segments) < 2:
+        return False
+    for seg in segments:
+        seg = seg.strip()
+        if not seg:
+            continue
+        if re.match(r"^cd\s+\S+$", seg):
+            continue
+        if re.match(r"^source\s+\S*/bin/activate\s*$", seg):
+            continue
+        if not is_safe_bash(seg):
+            return False
+    return True
+
+
+def _is_safe_print_segment(segment: str) -> bool:
+    """A read-only print statement: printf/echo, optionally piped to safe filters.
+
+    Used inside char-counting scripts. No redirects, backgrounding, or command
+    substitution — only stdout output, optionally measured by a filter (wc, etc.).
+    """
+    seg = segment.strip()
+    if not seg:
+        return True
+    if any(ch in seg for ch in (">", "<", "&")):
+        return False
+    parts = _split_top_level_pipes(seg)
+    if not re.match(r"^(printf|echo)\b", parts[0].strip()):
+        return False
+    return all(_is_safe_pipe_filter(p) for p in parts[1:])
+
+
+def _is_safe_measure_script(command: str) -> bool:
+    """Recognize read-only character-counting scripts used to size draft text.
+
+    Shape: optional `VAR="literal"` assignments, then either
+        for V in "draft1" "draft2" ...; do printf '%s' "$V" | wc -c; done
+    or plain `printf/echo ... | wc -c` statements. The loop operands must be
+    quoted string literals (pure data) and the body only printf/echo piped to
+    read-only filters. Rejects command substitution, backticks, redirects, globs,
+    and any non-print command — so it cannot run or mutate anything. Common in
+    social-post workflows that check drafts against a character limit.
+    """
+    cmd = command.strip()
+    # Command substitution could run anything — never auto-approve.
+    if "$(" in cmd or "`" in cmd:
+        return False
+    # Neutralize quoted data so structure checks ignore arbitrary draft text.
+    stripped = _strip_quoted_strings(cmd)
+    stripped = re.sub(r"\\\s*\n", " ", stripped)        # join line continuations
+    stripped = re.sub(r"\s*\n\s*", " ; ", stripped)     # newlines separate statements
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    # Peel optional leading `VAR=""` / `VAR=''` literal assignments.
+    while True:
+        m = re.match(r"^[A-Za-z_]\w*=(?:\"\"|'')\s*(?:;\s*)?", stripped)
+        if not m:
+            break
+        stripped = stripped[m.end():].strip()
+    if not stripped:
+        return False
+    # Case A: a for-loop over quoted literals with a printf/echo measuring body.
+    m = re.match(r"^for\s+[A-Za-z_]\w*\s+in\s+(.*?)\s*;\s*do\s+(.*?)\s*;?\s*done$", stripped)
+    if m:
+        operands, body = m.group(1), m.group(2)
+        # Operands must be only quoted-string placeholders (pure data, no globs/vars).
+        if re.sub(r"(\"\"|'')|\s+", "", operands) != "":
+            return False
+        return all(_is_safe_print_segment(s) for s in body.split(";"))
+    # Case B: plain printf/echo measuring statements (no loop).
+    return all(_is_safe_print_segment(s) for s in stripped.split(";"))
+
+
 def is_safe_bash(command: str) -> bool:
     """Check if a bash command matches safe patterns."""
     cmd = command.strip()
@@ -885,9 +1019,17 @@ def is_safe_bash(command: str) -> bool:
     # trigger the guard.
     if _is_safe_filter_heredoc(cmd_for_meta):
         return True
+    # Read-only char-counting scripts (printf/echo | wc loops over literal drafts).
+    # Checked before meta-char detection because ; and | trigger the guard.
+    if _is_safe_measure_script(cmd_for_meta):
+        return True
     # Safe compound commands (cd <path> && git status && git log) — checked
     # before meta-char detection because && triggers the guard.
     if "&&" in cmd_for_meta and _is_safe_compound_command(cmd_for_meta):
+        return True
+    # Safe sequences joined by ; or || (and &&) where every segment is safe —
+    # checked before meta-char detection because the separators trigger the guard.
+    if any(op in cmd_for_meta for op in (";", "&&", "||")) and _is_safe_sequence(cmd_for_meta):
         return True
     # Standalone git commit with heredoc — meta-chars are heredoc syntax, not chaining
     if _is_safe_git_commit_heredoc(cmd_for_meta):

@@ -479,6 +479,63 @@ EOF
         assert not permission_hook.is_safe_bash("npx cowsay hello")
         assert not permission_hook.is_safe_bash("npx create-react-app my-app")
 
+    def test_2026_06_02_pipe_filter_hides_trailing_command(self):
+        '''SECURITY: `_is_safe_pipe_filter` only inspected the first token of a
+        pipe segment, so a destructive command chained after a safe filter rode
+        along auto-approved — e.g. `cat foo | head -20; rm -rf ~/important` was
+        is_safe_bash=True and not caught as dangerous. Any
+        `<safe> | <filter>; <arbitrary>` bypassed both tiers.'''
+        # The exact hole: rm hidden after a safe pipe filter must NOT be auto-approved
+        assert not permission_hook.is_safe_bash("cat foo | head -20; rm -rf ~/important")
+        assert not permission_hook.is_safe_bash("grep x file | wc -l; sudo rm -rf /")
+        assert not permission_hook.is_safe_bash("find . | head -5 && rm -rf /tmp/x/*")
+        assert not permission_hook.is_safe_bash("cat x | head; python3 evil.py")
+        assert not permission_hook.is_safe_bash("wc -l f | head; echo `rm -rf x`")
+        assert not permission_hook.is_safe_bash("cat a | grep -v $(rm x)")
+        assert not permission_hook.is_safe_bash("ls | head > /tmp/out")
+        # Legit single-filter pipes must still be safe — including a separator
+        # that lives *inside* a quoted argument (not a real chain).
+        assert permission_hook.is_safe_bash("cat /a.log 2>&1 | tail -100")
+        assert permission_hook.is_safe_bash("grep x file | wc -l")
+        assert permission_hook.is_safe_bash("grep 'a;b' file | head")
+        assert permission_hook.is_safe_bash('find . -name "*.py" | head -20')
+
+    def test_2026_06_02_safe_sequence_semicolon_and_or(self):
+        '''Read-only inspection lines joined by ; or || were going to Tier 3
+        (~150+ calls in the log: ls/cat/grep/which/find combos). Each segment is
+        independently safe, so the whole sequence is safe.'''
+        assert permission_hook.is_safe_bash('ls ~/x 2>/dev/null | head -20; echo "---"; ls ~/y')
+        assert permission_hook.is_safe_bash("which python3 && python3 --version; python3.13 --version 2>/dev/null")
+        assert permission_hook.is_safe_bash('git status -- x; echo "---"; git log --oneline -5')
+        assert permission_hook.is_safe_bash("ls ~/.openclaw/ 2>/dev/null || echo 'no dir'")
+        # A sequence with any unsafe segment must NOT be auto-approved
+        assert not permission_hook.is_safe_bash("ls foo; rm -rf bar")
+        assert not permission_hook.is_safe_bash("cat x; python3 script.py")
+        assert not permission_hook.is_safe_bash("cd ~/p && source .venv/bin/activate && python -m intelligence.test")
+
+    def test_2026_06_02_measure_script_draft_sizing(self):
+        '''Found: `for d in "draft"...; do printf '%s' "$d" | wc -c; done`
+        char-counting loops went to Tier 3 and got a nondeterministic false DENY
+        (3 ALLOW then 1 DENY on the same shape). These read-only printf|wc loops
+        over literal drafts should be Tier 1 safe.'''
+        # Real billy shapes
+        assert permission_hook.is_safe_bash(
+            'for d in \\\n"draft one here" \\\n"draft two here" \\\n; do printf \'%s\\n\' "$d" | wc -c; done'
+        )
+        assert permission_hook.is_safe_bash(
+            'url="https://x.com/y"\nfor d in \\\n"draft one" \\\n"draft two" \\\n'
+            '; do printf \'%s %s\\n\' "$d" "$url" | wc -c; done'
+        )
+        assert permission_hook.is_safe_bash(
+            'url="https://x"\nd="a draft here"\nprintf \'%s %s\' "$d" "$url" | wc -c'
+        )
+        # Must reject anything that runs/mutates: command sub, redirect, glob, | sh, rm
+        assert not permission_hook.is_safe_bash('for d in "x"; do rm -rf ~/$d; done')
+        assert not permission_hook.is_safe_bash('for d in "x"; do printf \'%s\' "$d" > /tmp/out; done')
+        assert not permission_hook.is_safe_bash('url="$(curl http://evil)"\nfor d in "x"; do printf \'%s\' "$d" | wc -c; done')
+        assert not permission_hook.is_safe_bash('for f in *.txt; do cat "$f"; done')
+        assert not permission_hook.is_safe_bash('for d in "x"; do printf \'%s\' "$d" | sh; done')
+
 
 # ============================================================================
 # Stop hook regressions
