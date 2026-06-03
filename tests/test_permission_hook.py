@@ -1482,3 +1482,151 @@ EOF"""
 whoami
 EOF"""
         assert hook.is_safe_bash(cmd) is False
+
+
+# ============================================================================
+# Home-directory recursive delete → always-ask
+# ============================================================================
+
+
+class TestHomeRecursiveDelete:
+    """`rm -rf ~/…` / `rm -rf $HOME/…` route to always-ask, not Tier 3.
+
+    Regression for a false approval (2026-06-02): `cat foo | head -20; rm -rf
+    ~/important` fell to Tier 3 and claude -p rubber-stamped it ALLOW. An
+    irreversible recursive delete inside the home dir must reach the user. It
+    deliberately stays OUT of the hard-deny tier (legit `rm -rf ~/project`
+    cleanup), so the fix routes it to always-ask instead.
+    """
+
+    def test_rm_rf_home_tilde_subdir(self):
+        assert hook.is_home_recursive_delete("rm -rf ~/important") is True
+
+    def test_rm_rf_home_var_subdir(self):
+        assert hook.is_home_recursive_delete("rm -rf $HOME/important") is True
+
+    def test_rm_fr_flag_order(self):
+        assert hook.is_home_recursive_delete("rm -fr ~/important") is True
+
+    def test_rm_separate_flags(self):
+        assert hook.is_home_recursive_delete("rm -r -f ~/important") is True
+
+    def test_rm_long_flags(self):
+        assert hook.is_home_recursive_delete(
+            "rm --recursive --force ~/important"
+        ) is True
+
+    def test_rm_buried_after_pipe_semicolon(self):
+        """The original false-approval shape: delete buried in a compound command."""
+        assert hook.is_home_recursive_delete(
+            "cat foo | head -20; rm -rf ~/important"
+        ) is True
+
+    def test_relative_delete_not_matched(self):
+        """`rm -rf build` is left to Tier 3 — relative cleanup, not home-dir."""
+        assert hook.is_home_recursive_delete("rm -rf build") is False
+
+    def test_tmp_delete_not_matched(self):
+        assert hook.is_home_recursive_delete("rm -rf /tmp/foo") is False
+
+    def test_non_recursive_home_delete_not_matched(self):
+        """Single-file `rm ~/file` (no -r) isn't a recursive tree delete."""
+        assert hook.is_home_recursive_delete("rm ~/file.txt") is False
+
+    def test_force_only_home_delete_not_matched(self):
+        """`rm -f ~/file` (force, no recursive) isn't matched."""
+        assert hook.is_home_recursive_delete("rm -f ~/file.txt") is False
+
+    def test_case_insensitive(self):
+        assert hook.is_home_recursive_delete("RM -RF ~/important") is True
+
+    def test_integration_routes_to_ask(self):
+        """main() falls through to the user (passthrough) — not auto-approved."""
+        result = run_hook_capture("Bash", {"command": "rm -rf ~/important"})
+        assert result == {}
+
+    def test_integration_compound_routes_to_ask(self):
+        result = run_hook_capture(
+            "Bash", {"command": "cat foo | head -20; rm -rf ~/important"}
+        )
+        assert result == {}
+
+
+# ============================================================================
+# Temp-file heredoc scratch writes → safe
+# ============================================================================
+
+
+class TestTmpHeredocWrite:
+    """`cat > /tmp/draft.txt <<'EOF' … EOF` scratch writes auto-approve.
+
+    Regression for a false denial + Tier 3 flapping (2026-06-02): identical
+    `cat > /tmp/<file> <<'EOF'` draft writes got ALLOW on one file and DENY on
+    the next from nondeterministic claude -p. A single-quoted heredoc redirected
+    into a temp dir is a literal, side-effect-free scratch write.
+    """
+
+    def test_tmp_write(self):
+        cmd = """cat > /tmp/reply.txt <<'EOF'
+A draft reply with no dangerous tokens.
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_tmp_write_with_space(self):
+        cmd = """cat > /tmp/reply.txt << 'EOF'
+draft
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_tmp_append(self):
+        cmd = """cat >> /tmp/log.txt <<'EOF'
+appended line
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_var_folders_write(self):
+        cmd = """cat > /var/folders/ab/scratch.txt <<'EOF'
+draft
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_tmpdir_var_write(self):
+        cmd = """cat > $TMPDIR/draft.txt <<'EOF'
+draft
+EOF"""
+        assert hook.is_safe_bash(cmd) is True
+
+    def test_non_tmp_path_not_safe(self):
+        """Writing outside a temp dir stays at Tier 3 — not auto-approved."""
+        cmd = """cat > /home/user/project/file.txt <<'EOF'
+data
+EOF"""
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_traversal_blocked(self):
+        """`..` in the target defeats the temp-dir restriction — not safe."""
+        cmd = """cat > /tmp/../etc/passwd <<'EOF'
+pwned
+EOF"""
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_sensitive_tmp_filename_not_safe(self):
+        """Even under /tmp, a secrets-looking filename is not auto-approved."""
+        cmd = """cat > /tmp/.env <<'EOF'
+SECRET=1
+EOF"""
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_double_quoted_delimiter_not_safe(self):
+        """Double-quoted delimiter allows expansion — not auto-approved."""
+        cmd = '''cat > /tmp/x.txt << "EOF"
+$(rm -rf /)
+EOF'''
+        assert hook.is_safe_bash(cmd) is False
+
+    def test_integration_auto_approved(self):
+        cmd = """cat > /tmp/reply.txt <<'EOF'
+A clean draft reply.
+EOF"""
+        result = run_hook_capture("Bash", {"command": cmd})
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "allow"

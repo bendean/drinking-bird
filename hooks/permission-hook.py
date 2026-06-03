@@ -116,6 +116,31 @@ def _matches_always_ask(command: str) -> bool:
             return True
     return False
 
+
+def is_home_recursive_delete(command: str) -> bool:
+    """True for `rm -rf ~/…` / `rm -rf $HOME/…` recursive force-deletes.
+
+    These deliberately fall outside both the doomsday tier (which blocks only a
+    *full* home/root wipe — `rm -rf ~`) and the hard-deny tier (tests keep legit
+    `rm -rf ~/some-project` cleanup approvable). But letting Tier 3 silently
+    rubber-stamp an irreversible delete *inside* the home directory is wrong —
+    these are routed to always-ask so the user confirms (and auto-approved in
+    autonomous mode, like every other always-ask pattern).
+
+    Requires both a recursive flag (-r/-R/--recursive) and a force flag
+    (-f/--force) between `rm` and a `~/`- or `$HOME/`-prefixed target, scanned
+    per shell segment so a delete buried after a pipe/semicolon still matches
+    (e.g. `cat foo | head; rm -rf ~/important`). Relative deletes
+    (`rm -rf build`) and tmp deletes are unaffected — they stay at Tier 3.
+    """
+    for m in re.finditer(r"\brm\b([^|;&\n]*?)\s(?:~|\$home)/\S", command, re.IGNORECASE):
+        flags = m.group(1)
+        has_r = re.search(r"-\w*r|--recursive", flags, re.IGNORECASE)
+        has_f = re.search(r"-\w*f|--force", flags, re.IGNORECASE)
+        if has_r and has_f:
+            return True
+    return False
+
 # Bash commands that are always safe (prefix match)
 SAFE_BASH_PREFIXES = [
     "npm run ",
@@ -617,6 +642,42 @@ def _is_safe_filter_heredoc(command: str) -> bool:
     return True
 
 
+# Temp-directory prefixes where redirecting a scratch write is safe. macOS uses
+# /var/folders (often surfaced as /private/var/folders); /tmp is a symlink to
+# /private/tmp. $TMPDIR is handled separately since it's a variable, not a path.
+SAFE_TMP_WRITE_PREFIXES = (
+    "/tmp/",
+    "/private/tmp/",
+    "/var/folders/",
+    "/private/var/folders/",
+)
+
+
+def _is_safe_tmp_heredoc(command: str) -> bool:
+    """Recognize `cat > <tmpfile> << 'EOF' … EOF` scratch writes as safe.
+
+    A single-quoted heredoc redirected (`>` or `>>`) into a temp-directory file
+    is a literal scratch write: no expansion, no command substitution, and the
+    only side effect is a file under a throwaway temp dir. This is the common
+    draft-a-blob pattern (e.g. composing post text) that otherwise lands at
+    Tier 3 and gets nondeterministic verdicts. Restricted to known temp dirs,
+    guarded against `..` traversal and sensitive filenames.
+    """
+    first_line = command.split("\n", 1)[0]
+    m = re.match(r"\s*cat\s+>>?\s*(\S+)\s+<<\s*'[A-Za-z_]+'\s*$", first_line)
+    if not m:
+        return False
+    target = m.group(1)
+    if ".." in target:
+        return False
+    in_tmp = target.startswith(SAFE_TMP_WRITE_PREFIXES) or target.startswith("$TMPDIR/")
+    if not in_tmp:
+        return False
+    if is_sensitive_file(target):
+        return False
+    return True
+
+
 def _is_safe_git_compound(command: str) -> bool:
     """Recognize safe compound git commands like 'git add ... && git commit -m ...'
 
@@ -1019,6 +1080,11 @@ def is_safe_bash(command: str) -> bool:
     # trigger the guard.
     if _is_safe_filter_heredoc(cmd_for_meta):
         return True
+    # Safe scratch writes: single-quoted heredoc redirected into a temp file
+    # (cat > /tmp/draft.txt <<'EOF'). Checked before meta-char detection because
+    # > and << trigger the guard. Restricted to temp dirs, traversal-guarded.
+    if _is_safe_tmp_heredoc(cmd_for_meta):
+        return True
     # Read-only char-counting scripts (printf/echo | wc loops over literal drafts).
     # Checked before meta-char detection because ; and | trigger the guard.
     if _is_safe_measure_script(cmd_for_meta):
@@ -1276,7 +1342,7 @@ def main():
 
         # Always-ask: commands that require user confirmation every time
         # In autonomous mode, auto-approve (Tier 2 dangerous check above still blocks)
-        if _matches_always_ask(command):
+        if _matches_always_ask(command) or is_home_recursive_delete(command):
             if autonomous:
                 reason = f"Autonomous: auto-approve always-ask: {command}"
                 log("ALLOW", tool_name, reason, tool_input)
