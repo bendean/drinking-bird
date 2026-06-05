@@ -587,6 +587,27 @@ def _strip_cd_prefix(command: str) -> str:
     return command[m.end():] if m else command
 
 
+def _heredoc_trailing_is_safe(command: str, delim: str) -> bool:
+    """True if a single-quoted heredoc closes and any trailing commands are safe.
+
+    The heredoc-recognizing checkers (`_is_safe_heredoc`, `_is_safe_filter_heredoc`,
+    `_is_safe_tmp_heredoc`) only inspect the FIRST line. The body is literal data
+    terminated by a line consisting solely of <delim>; anything AFTER that line is
+    a separate command that the first-line check never saw. Without this guard a
+    trailing `\\nrm -rf ~/important` (or any command Tier 2 doesn't independently
+    flag) rides in on the heredoc's auto-approval. Require the trailing text — if
+    any — to be safe on its own; otherwise the caller falls through to Tier 3.
+    A heredoc whose delimiter never closes is malformed: don't auto-approve a
+    partial parse.
+    """
+    lines = command.split("\n")
+    for i in range(1, len(lines)):
+        if lines[i] == delim:
+            trailing = "\n".join(lines[i + 1:]).strip()
+            return is_safe_bash(trailing) if trailing else True
+    return False
+
+
 def _is_safe_heredoc(command: str) -> bool:
     """Recognize safe interpreter heredoc commands like python3 << 'PYEOF'.
 
@@ -594,11 +615,14 @@ def _is_safe_heredoc(command: str) -> bool:
     runs inline code in the same security context as writing a temp file.
     Only safe interpreters are allowed — bash/sh/zsh are excluded.
     """
-    return bool(re.match(
+    m = re.match(
         r"(" + "|".join(re.escape(i) for i in SAFE_HEREDOC_INTERPRETERS) + r")"
-        r"\s+<<\s*'[A-Za-z_]+'\s*\n",
+        r"\s+<<\s*'([A-Za-z_]+)'\s*\n",
         command,
-    ))
+    )
+    if not m:
+        return False
+    return _heredoc_trailing_is_safe(command, m.group(2))
 
 
 def _is_safe_filter_heredoc(command: str) -> bool:
@@ -618,18 +642,19 @@ def _is_safe_filter_heredoc(command: str) -> bool:
     # the right part is an optional `| filter ...` pipeline. Matching `<<` anywhere
     # (not just abutting the command word) lets `awk '…' <<'EOF'` qualify the same
     # way `cat <<'EOF' | awk '…'` already does — both are read-only.
-    m = re.match(r"\s*(.*?)\s*<<\s*'[A-Za-z_]+'\s*(.*)$", first_line)
+    m = re.match(r"\s*(.*?)\s*<<\s*'([A-Za-z_]+)'\s*(.*)$", first_line)
     if not m:
         return False
-    lead_cmd, rest = m.group(1).strip(), m.group(2).strip()
+    lead_cmd, delim, rest = m.group(1).strip(), m.group(2), m.group(3).strip()
     # The heredoc-consuming command must itself be a read-only filter. Reuse the
     # pipe-filter validator so awk (no system/getline/redirect), while-read loops,
     # and the plain filters (cat, head, grep, ...) are all accepted consistently.
     if not _is_safe_pipe_filter(lead_cmd):
         return False
-    # Bare `cat <<'EOF'` with no trailing pipeline is safe.
+    # Bare `cat <<'EOF'` with no trailing pipeline is safe — but still verify
+    # nothing unsafe is chained after the closing delimiter.
     if not rest:
-        return True
+        return _heredoc_trailing_is_safe(command, delim)
     # Otherwise the remainder must be `| filter [| filter ...]`.
     if not rest.startswith("|"):
         return False
@@ -639,7 +664,7 @@ def _is_safe_filter_heredoc(command: str) -> bool:
             continue
         if not _is_safe_pipe_filter(seg):
             return False
-    return True
+    return _heredoc_trailing_is_safe(command, delim)
 
 
 # Temp-directory prefixes where redirecting a scratch write is safe. macOS uses
@@ -664,10 +689,10 @@ def _is_safe_tmp_heredoc(command: str) -> bool:
     guarded against `..` traversal and sensitive filenames.
     """
     first_line = command.split("\n", 1)[0]
-    m = re.match(r"\s*cat\s+>>?\s*(\S+)\s+<<\s*'[A-Za-z_]+'\s*$", first_line)
+    m = re.match(r"\s*cat\s+>>?\s*(\S+)\s+<<\s*'([A-Za-z_]+)'\s*$", first_line)
     if not m:
         return False
-    target = m.group(1)
+    target, delim = m.group(1), m.group(2)
     if ".." in target:
         return False
     in_tmp = target.startswith(SAFE_TMP_WRITE_PREFIXES) or target.startswith("$TMPDIR/")
@@ -675,7 +700,7 @@ def _is_safe_tmp_heredoc(command: str) -> bool:
         return False
     if is_sensitive_file(target):
         return False
-    return True
+    return _heredoc_trailing_is_safe(command, delim)
 
 
 def _is_safe_git_compound(command: str) -> bool:
