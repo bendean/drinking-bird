@@ -886,6 +886,36 @@ class TestIsSafeBashExtended:
         """sed --in-place (GNU long form) should NOT be auto-approved."""
         assert hook.is_safe_bash("sed --in-place 's/foo/bar/' file.py") is False
 
+    def test_sed_as_pipe_filter(self):
+        """sed -n as a pipe filter (cat f | sed -n '1,10p') is read-only."""
+        assert hook.is_safe_bash("cat f.txt | sed -n '1,10p'") is True
+
+    def test_sed_i_as_pipe_filter_not_safe(self):
+        """sed -i riding along in a pipe must NOT be auto-approved."""
+        assert hook.is_safe_bash("cat f.txt | sed -i 's/a/b/' g.txt") is False
+
+    def test_jq_read_only(self):
+        """jq is a read-only JSON processor (output to stdout)."""
+        assert hook.is_safe_bash("jq -r '.result' file.txt") is True
+
+    def test_jq_piped_to_filter(self):
+        """jq piped to a read-only filter is auto-approved."""
+        assert hook.is_safe_bash("jq -r '.result' file.txt | head -50") is True
+
+    def test_jq_write_redirect_not_safe(self):
+        """jq with output redirection is a write — falls through to Tier 3."""
+        assert hook.is_safe_bash("jq -r '.result' f.txt > /tmp/out.json") is False
+
+    def test_billy_tool_results_read_pattern(self):
+        """Regression: billy-agent reads its MCP tool-result files via
+        `cd <tool-results> && jq -r '.result' FILE | sed -n 'A,Bp'`. This
+        benign read was hitting Tier 3 every ~30 min and occasionally being
+        denied non-deterministically. Must be auto-approved."""
+        cmd = ("cd /Users/ben/.claude/projects/-Users-ben-dev-billy-project-billy-agent/"
+               "abc123/tool-results && jq -r '.result' "
+               "mcp-billy-get_news_inbox-1780943809571.txt | sed -n '1,40p'")
+        assert hook.is_safe_bash(cmd) is True
+
 
 # ============================================================================
 # Tests for curl read-only auto-approval

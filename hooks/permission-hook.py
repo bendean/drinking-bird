@@ -191,6 +191,7 @@ SAFE_BASH_PREFIXES = [
     "date",
     "find ",
     "grep ",
+    "jq ",
     "rg ",
     "ag ",
     "fd ",
@@ -773,6 +774,21 @@ def _is_safe_awk(segment: str) -> bool:
     return not any(t in segment for t in AWK_UNSAFE_TOKENS)
 
 
+def _is_safe_sed(segment: str) -> bool:
+    """Check if a sed command is read-only (prints to stdout, no file writes).
+
+    sed is read-only by default, but `-i`/`--in-place` rewrites files in place.
+    The `w`/`W` write commands and the GNU `e` execute command can also touch
+    the filesystem or spawn processes; output redirection (`>`) is handled by
+    the caller's meta-char guards. Mirrors the standalone-sed policy in
+    is_safe_bash so the same command is judged identically whether it stands
+    alone or sits in a pipe.
+    """
+    if " -i" in segment or "--in-place" in segment:
+        return False
+    return True
+
+
 def _is_safe_read_loop(segment: str) -> bool:
     """Recognize a read-only `while read` line-processing loop.
 
@@ -831,6 +847,9 @@ def _is_safe_pipe_filter(segment: str) -> bool:
     # awk is read-only by default, but system()/getline/redirect can have side effects
     if cmd == "awk":
         return _is_safe_awk(seg)
+    # sed is read-only unless -i/--in-place; common as `... | sed -n '1,40p'`
+    if cmd == "sed":
+        return _is_safe_sed(seg)
     # python3 -m json.tool is a read-only JSON formatter
     if cmd in ("python3", "python") and len(tokens) >= 3 and tokens[1] == "-m" and tokens[2] == "json.tool":
         return True
@@ -1153,7 +1172,7 @@ def is_safe_bash(command: str) -> bool:
     if cmd_for_match.startswith("gh ") and is_safe_gh(cmd_for_match):
         return True
     # sed without -i/--in-place is read-only (output to stdout, no file modification)
-    if cmd_for_match.startswith("sed ") and " -i" not in cmd_for_match and "--in-place" not in cmd_for_match:
+    if cmd_for_match.startswith("sed ") and _is_safe_sed(cmd_for_match):
         return True
     return False
 
