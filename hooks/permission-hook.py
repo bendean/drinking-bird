@@ -789,6 +789,15 @@ def _is_safe_sed(segment: str) -> bool:
     return True
 
 
+# One read-only command substitution allowed inside a measuring-loop body:
+#   $(printf '%s' "$var" | wc -m)   — prints the loop variable and counts it.
+# wc -m/-c/-w are all read-only length counters. Nothing else qualifies, so the
+# blanket `$(` ban below still rejects any other command substitution.
+_SAFE_WC_SUBST = re.compile(
+    r"""\$\(\s*printf\s+(?:'%s'|"%s"|%s)\s+"?\$\w+"?\s*\|\s*wc\s+-[mcw]+\s*\)"""
+)
+
+
 def _is_safe_read_loop(segment: str) -> bool:
     """Recognize a read-only `while read` line-processing loop.
 
@@ -797,7 +806,9 @@ def _is_safe_read_loop(segment: str) -> bool:
     Only printf/echo bodies are allowed, and the body must contain no command
     substitution, redirects, pipes, or extra command separators — so the loop
     writes to stdout and nothing else. Common in char-counting workflows where
-    each draft line's length is printed.
+    each draft line's length is printed. The one exception is a read-only
+    char-count substitution `$(printf '%s' "$line" | wc -m)` (the Unicode-aware
+    sibling of `${#line}`), which is neutralized before the strict checks run.
     """
     seg = segment.strip()
     m = re.match(
@@ -807,6 +818,9 @@ def _is_safe_read_loop(segment: str) -> bool:
     if not m:
         return False
     body = m.group(1).strip()
+    # Neutralize the allowed wc-counting substitution so the strict checks below
+    # apply to the rest of the body without tripping on its `$(` and inner `|`.
+    body = _SAFE_WC_SUBST.sub("0", body)
     # Body must be only printf/echo — no other commands.
     if not re.match(r"^(printf|echo)\b", body):
         return False
