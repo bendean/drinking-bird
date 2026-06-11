@@ -704,6 +704,86 @@ def _is_safe_tmp_heredoc(command: str) -> bool:
     return _heredoc_trailing_is_safe(command, delim)
 
 
+def _split_heredoc_statements(command: str):
+    """Split a multi-line command into logical statements, consuming heredoc bodies.
+
+    Walks line by line. A line opening a single-quoted heredoc (`<<'DELIM'`)
+    starts a block that absorbs every following line up to and including the line
+    equal to DELIM; that whole block becomes one statement. All other lines are
+    standalone statements. Returns the list of statement strings, or None if a
+    heredoc is opened but never closed (malformed — a partial parse must not be
+    auto-approved). Detection is intentionally naive (no quote stripping): a `<<`
+    hidden inside a quoted argument may misparse, but that only ever yields a
+    block the safe-filter check rejects, so the failure mode is Tier 3, never an
+    unsafe approval.
+    """
+    lines = command.split("\n")
+    statements = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        m = re.search(r"<<\s*'([A-Za-z_]+)'", line)
+        if m:
+            delim = m.group(1)
+            block = [line]
+            i += 1
+            closed = False
+            while i < n:
+                block.append(lines[i])
+                if lines[i] == delim:
+                    i += 1
+                    closed = True
+                    break
+                i += 1
+            if not closed:
+                return None
+            statements.append("\n".join(block))
+        else:
+            statements.append(line)
+            i += 1
+    return statements
+
+
+def _is_safe_multi_heredoc_sequence(command: str) -> bool:
+    """Recognize a sequence of safe filter-heredocs joined by plain separators.
+
+    Billy's draft-comparison workflow sizes two variants in one command:
+        cat <<'EOF' | awk '{ print "LEN: " length }'
+        <draft one>
+        EOF
+        echo "==="
+        cat <<'EOF' | awk '{ print "LEN: " length }'
+        <draft two>
+        EOF
+    Each heredoc block is individually Tier-1 safe (`_is_safe_filter_heredoc`),
+    but the multi-block sequence matched no single pattern and fell to Tier 3
+    with nondeterministic verdicts — the same draft-sizing workflow the single
+    heredoc and measure-script paths already make deterministic. Require at least
+    one heredoc block, every heredoc block a safe filter-heredoc, and every
+    non-heredoc line an independently safe command (echo/printf separators, ls,
+    etc.). Any unrecognized or unsafe statement → False (falls through to Tier 3).
+    """
+    if "<<" not in command or "\n" not in command:
+        return False
+    statements = _split_heredoc_statements(command)
+    if statements is None:
+        return False
+    saw_heredoc = False
+    for stmt in statements:
+        s = stmt.strip()
+        if not s:
+            continue
+        first = stmt.split("\n", 1)[0]
+        if "\n" in stmt and re.search(r"<<\s*'[A-Za-z_]+'", first):
+            if not _is_safe_filter_heredoc(stmt):
+                return False
+            saw_heredoc = True
+        elif not is_safe_bash(s):
+            return False
+    return saw_heredoc
+
+
 def _is_safe_git_compound(command: str) -> bool:
     """Recognize safe compound git commands like 'git add ... && git commit -m ...'
 
@@ -1137,6 +1217,12 @@ def is_safe_bash(command: str) -> bool:
     # read-only filters. Checked before meta-char detection because << and |
     # trigger the guard.
     if _is_safe_filter_heredoc(cmd_for_meta):
+        return True
+    # Multi-heredoc draft-sizing sequences (two `cat <<'EOF' | awk/wc` blocks
+    # joined by `echo "==="` separators). Each block is an individually-safe
+    # filter-heredoc; the sequence as a whole otherwise falls to Tier 3. Checked
+    # before meta-char detection because << and | trigger the guard.
+    if _is_safe_multi_heredoc_sequence(cmd_for_meta):
         return True
     # Safe scratch writes: single-quoted heredoc redirected into a temp file
     # (cat > /tmp/draft.txt <<'EOF'). Checked before meta-char detection because

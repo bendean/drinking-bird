@@ -568,6 +568,55 @@ EOF
             'while IFS= read -r line; do printf \'%s\' "$(printf \'%s\' "$line" | sh)"; done'
         )
 
+    def test_2026_06_11_multi_heredoc_draft_sizing(self):
+        '''Found: billy sizes two draft variants in one command —
+            cat <<'EOF' | awk '{ print "LEN: " length }'
+            <draft one>
+            EOF
+            echo "==="
+            cat <<'EOF' | awk '{ print "LEN: " length }'
+            <draft two>
+            EOF
+        Each heredoc block is individually Tier-1 safe, but the multi-block
+        sequence matched no single pattern and hit Tier 3 (~5 ALLOWs in one
+        morning) with a flip risk. The sequence is now recognized when every
+        block is a safe filter-heredoc and every separator is independently safe.'''
+        # Real billy shapes (awk LEN, awk PROSE-ONLY, wc -m)
+        assert permission_hook.is_safe_bash(
+            'cat <<\'EOF\' | awk \'{ print "LEN: " length; print "" }\'\n'
+            'Tonight\'s the get-right test, no excuses left.\nEOF\n'
+            'echo "==="\n'
+            'cat <<\'EOF\' | awk \'{ print "LEN: " length; print "" }\'\n'
+            'Tonight\'s the get-right test, and there\'s no excuse left.\nEOF'
+        )
+        assert permission_hook.is_safe_bash(
+            'cat <<\'EOF\' | wc -m\nDraft one.\nEOF\n'
+            'echo "---url adds 23 via t.co---"\n'
+            'cat <<\'EOF\' | wc -m\nDraft two.\nEOF'
+        )
+        # Single heredoc must still be safe (subsumed but unchanged)
+        assert permission_hook.is_safe_bash(
+            'cat <<\'EOF\' | awk \'{ print length }\'\na draft\nEOF'
+        )
+        # A dangerous command hiding as a separator must NOT ride along
+        assert not permission_hook.is_safe_bash(
+            'cat <<\'EOF\' | wc -m\ndraft\nEOF\nrm -rf ~/important\n'
+            'cat <<\'EOF\' | wc -m\ndraft2\nEOF'
+        )
+        assert not permission_hook.is_safe_bash(
+            'cat <<\'EOF\' | wc -m\ndraft\nEOF\npython3 evil.py\n'
+            'cat <<\'EOF\' | wc -m\ndraft2\nEOF'
+        )
+        # A heredoc block piped to a shell is not a safe filter
+        assert not permission_hook.is_safe_bash(
+            'cat <<\'EOF\' | sh\necho pwned\nEOF\necho "==="\n'
+            'cat <<\'EOF\' | wc -m\ndraft\nEOF'
+        )
+        # An unclosed heredoc is malformed — never auto-approve a partial parse
+        assert not permission_hook.is_safe_bash(
+            'cat <<\'EOF\' | wc -m\nnever closes'
+        )
+
 
 # ============================================================================
 # Stop hook regressions
